@@ -3,22 +3,22 @@ from pydub import AudioSegment
 from scipy import signal
 
 class BPMAnalyzer:
-    def __init__(self, frame_size=2048, hop_size=512):
+    def __init__(self, frame_size=1024, hop_size=256):
         """
-        Initialize the BPM analyzer with optimized parameters
+        Initialize the BPM analyzer with optimized parameters for real-time microphone input
         
         Parameters:
             frame_size: Size of audio frames for processing
             hop_size: Step size between consecutive frames
         """
-        self.frame_size = frame_size
-        self.hop_size = hop_size
-        # Threshold multiplier for beat detection sensitivity
-        self.beat_threshold_multiplier = 1.3  # Increased from 1.2 for better detection
+        self.frame_size = frame_size  # Reduced for better real-time performance
+        self.hop_size = hop_size  # Reduced for better real-time performance
+        # Threshold multiplier for beat detection sensitivity - lower = more sensitive
+        self.beat_threshold_multiplier = 0.8  # Reduced from 1.3 for better sensitivity
         # Apply smoothing to BPM values
-        self.bpm_smoothing_window = 3  # Moving average window size
-        # Spectral flux threshold for better beat detection
-        self.spectral_flux_threshold = 0.15
+        self.bpm_smoothing_window = 2  # Reduced for better real-time response
+        # Spectral flux threshold for better beat detection - lower = more sensitive
+        self.spectral_flux_threshold = 0.05  # Reduced for better sensitivity
     
     def analyze_audio_data(self, audio_data, sample_rate):
         """
@@ -65,8 +65,13 @@ class BPMAnalyzer:
         Returns:
             List of beat timestamps in seconds
         """
-        # Normalize audio data
-        audio_data = audio_data / np.max(np.abs(audio_data))
+        # Normalize audio data, handling case where all values are zero
+        max_abs = np.max(np.abs(audio_data))
+        if max_abs == 0:
+            # If all values are zero, no normalization needed
+            audio_data = audio_data
+        else:
+            audio_data = audio_data / max_abs
         
         # Calculate energy envelope (root mean square per frame)
         energy = []

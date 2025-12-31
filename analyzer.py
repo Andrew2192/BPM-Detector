@@ -1,80 +1,109 @@
+#!/usr/bin/env python3
+"""
+BPM Analyzer application with PySide6 GUI, maintaining original interface structure
+"""
+
 import os
-os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
-import warnings
-warnings.filterwarnings(
-    "ignore",
-    category=UserWarning,
-    module=r"pygame\.pkgdata",
-    message=r"pkg_resources is deprecated as an API"
-)
-import numpy as np
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-import pygame
+import sys
 import threading
 import time
-from pydub import AudioSegment
-import math
+import warnings
+import json
+import urllib
+from datetime import datetime
+
+# Set environment variables to hide unwanted prompts and configure matplotlib
+os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+os.environ["QT_API"] = "pyside6"  # Explicitly use PySide6 for Qt bindings
+
+# Suppress deprecated pkg_resources warning from pygame
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
+
+# Fix for macOS IMKCFRunLoopWakeUpReliable error
+os.environ["QT_MAC_WANTS_LAYER"] = "1"
+
+# Import dependencies
+import numpy as np
+import pygame
+
+# Import PySide6 first to ensure it's available
+from PySide6 import QtCore, QtGui, QtWidgets
+
+# Now import matplotlib with explicit PySide6 backend
 import matplotlib
-matplotlib.use("TkAgg")
-import matplotlib.pyplot as plt
+matplotlib.use("Qt5Agg")  # Use Qt5 backend which is compatible with PySide6
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+
+# PySide6 imports
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QPushButton, QLabel, QFileDialog, QMessageBox, QProgressBar,
+    QComboBox, QTextEdit, QFrame, QSlider, QGroupBox, QScrollArea
+)
+from PySide6.QtCore import Qt, QTimer, QMetaObject, Q_ARG
+from PySide6.QtGui import QPalette, QColor, QFont, QIcon
+
+# Import project modules
+from bpm_core import BPMAnalyzer
 from bpm_visuals import plot_deviation_heatmap, plot_bpm_timeseries, plot_distributions
 from plot_config import apply_plot_style
+from audio_processing import load_audio_file, process_audio_segment
+from playback import AudioPlayer
+from mic_recording import MicRecorder
+from charting import ChartManager
+from utils import format_time, validate_audio_file
+
+# Apply custom plot styling
 apply_plot_style()
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import sounddevice as sd
-from scipy import signal
-from datetime import datetime
-import wave
 
 
+from PySide6.QtCore import Signal
 
-
-from bpm_core import BPMAnalyzer
-
-class BPMGUIApp:
-    def __init__(self, root):
+class BPMGUIApp(QMainWindow):
+    """
+    BPM Analyzer GUI application using PySide6, maintaining original Tkinter structure
+    """
+    
+    # Define signals for thread-safe UI updates
+    bpm_result_ready = Signal(float, str)
+    error_occurred = Signal(str)
+    
+    def __init__(self):
         """
         Initialize the BPM Analyzer GUI application
-        
-        Parameters:
-            root: Tkinter root window
         """
-        self.root = root
-        self.root.title("Advanced BPM Analyzer")
-        self.root.geometry("900x700")
-        self.root.minsize(800, 600)
+        super().__init__()
         
-        # Set theme and style
-        self.style = ttk.Style()
+        # Set window properties - match original Tkinter window
+        self.setWindowTitle("Advanced BPM Analyzer")
+        self.setGeometry(100, 100, 900, 800)
+        self.setMinimumSize(800, 600)
+        
+        # Configure macOS style for buttons while maintaining original structure
         self._setup_style()
         
-        # Initialize pygame mixer for audio playback
-        pygame.mixer.init()
+        # Connect signals to slots
+        self.bpm_result_ready.connect(self.update_bpm_result)
+        self.error_occurred.connect(self.show_error)
         
         # BPM Analyzer instance
         self.analyzer = BPMAnalyzer()
         
-        # Variables to store application state
-        self.audio_file = None
+        # Initialize managers
+        self.audio_player = AudioPlayer()
+        self.mic_recorder = MicRecorder(self.analyzer)
+        self.chart_manager = ChartManager()
         
+        # Variables to store application state - same as original
+        self.audio_file = None
         self.analyzing = False
-        self.playing = False
-        self.playback_position = 0
-        self.temp_wav_file = None
-        self.playback_thread = None
-        self.update_timer_id = None
         self.time_bpm_pairs = []
         self.ref_audio_duration = 0.0
         self.mic_audio_duration = 0.0
         self.audio_duration = 0.0
-        self.last_update_time = 0
         
         # Microphone monitoring state
-        self.mic_recording = False
-        self.mic_stream = None
-        self.mic_buffer = []
         self.mic_bpm_history = []
         self.mic_sample_rate = 44100
         self.mic_chunk_size = 1024
@@ -86,2985 +115,2490 @@ class BPMGUIApp:
         self.reference_file = None
         self.comparison_results = []
         
-        # Create widgets
+        # Create widgets - maintain original structure
         self._create_widgets()
         
-        # Configure grid weights for responsive layout
-        self._configure_layout()
-        
         # Set up window close handler
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.closeEvent = self.on_closing
     
     def _setup_style(self):
         """
-        Configure ttk styles for a modern look
+        Configure application style - only optimize buttons for macOS, maintain original structure
         """
-        # Set theme
-        self.style.theme_use("aqua")
+        # Set basic macOS color scheme
+        mac_colors = {
+            "background": "#f5f5f7",
+            "foreground": "#1d1d1f",
+            "secondary_text": "#6e6e73",
+            "accent": "#007aff",
+            "border": "#d2d2d7",
+            "button_bg": "#ffffff",
+            "button_hover": "#f2f2f7",
+            "button_pressed": "#ececf1"
+        }
         
-        # Configure frame style
-        self.style.configure(
-            "Modern.TFrame",
-            background="#f0f0f0",
-            borderwidth=1,
-            relief="flat"
-        )
+        # Get current palette
+        palette = self.palette()
         
-        # Configure button style
-        self.style.configure(
-            "Modern.TButton",
-            font=("Helvetica", 12),
-            padding=6
-        )
-        self.style.map(
-            "Modern.TButton",
-            background=[],
-            foreground=[]
-        )
+        # Set global colors
+        palette.setColor(QPalette.Window, QColor(mac_colors["background"]))
+        palette.setColor(QPalette.WindowText, QColor(mac_colors["foreground"]))
+        palette.setColor(QPalette.Text, QColor(mac_colors["foreground"]))
+        palette.setColor(QPalette.Disabled, QPalette.Text, QColor(mac_colors["secondary_text"]))
+        palette.setColor(QPalette.Base, QColor(mac_colors["background"]))
+        palette.setColor(QPalette.AlternateBase, QColor(mac_colors["background"]))
+        palette.setColor(QPalette.Highlight, QColor(mac_colors["accent"]))
+        palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
         
-        # Configure label style
-        self.style.configure(
-            "Title.TLabel",
-            font=("Arial", 14, "bold"),
-            foreground="#333333",
-            background="#f0f0f0"
-        )
-        self.style.configure(
-            "Value.TLabel",
-            font=("Arial", 18, "bold"),
-            foreground="#4a7abc",
-            background="#f0f0f0"
-        )
-        self.style.configure(
-            "Description.TLabel",
-            font=("Arial", 10),
-            foreground="#666666",
-            background="#f0f0f0"
-        )
+        # Apply palette
+        self.setPalette(palette)
         
-        # Configure progressbar style
-        self.style.configure(
-            "Modern.Horizontal.TProgressbar",
-            background="#4a7abc",
-            troughcolor="#e0e0e0",
-            bordercolor="#d0d0d0"
-        )
+        # Set font - use system available font
+        font = QFont("Helvetica", 13)
+        self.setFont(font)
     
     def _create_widgets(self):
         """
-        Create all UI widgets
+        Create all widgets for the application UI - maintain original structure
         """
-        # Main container
-        main_frame = ttk.Frame(self.root, style="Modern.TFrame")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # Create central widget
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
         
-        # Configure grid layout
-        main_frame.grid_columnconfigure(0, weight=1)
-        main_frame.grid_columnconfigure(1, weight=1)
-        main_frame.grid_rowconfigure(0, weight=0)
-        main_frame.grid_rowconfigure(1, weight=0)
-        main_frame.grid_rowconfigure(2, weight=1)  # For reference BPM chart
-        main_frame.grid_rowconfigure(3, weight=1)  # For microphone BPM chart
-        main_frame.grid_rowconfigure(4, weight=0)
-        main_frame.grid_rowconfigure(5, weight=0)
+        # Main layout
+        main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
         
-        # File selection section
-        file_section = ttk.Frame(main_frame, style="Modern.TFrame")
-        file_section.grid(row=0, column=0, columnspan=2, sticky="ew", pady=5, padx=5)
+        # Top file selection section
+        file_section = QWidget()
+        file_layout = QHBoxLayout(file_section)
+        file_layout.setSpacing(5)
         
-        ttk.Label(file_section, text="Audio File:", style="Modern.TLabel").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        # Audio file label and input
+        file_label = QLabel("Audio File:")
+        file_layout.addWidget(file_label)
         
-        self.file_entry = ttk.Entry(file_section, width=50)
-        self.file_entry.grid(row=0, column=1, sticky="ew", padx=5, pady=5)
-        file_section.grid_columnconfigure(1, weight=1)
+        self.file_path_display = QLabel("No file selected")
+        self.file_path_display.setFixedHeight(30)
+        self.file_path_display.setStyleSheet("background-color: white; border: 1px solid #d2d2d7; border-radius: 6px; padding: 5px;")
+        # Enable drag and drop for the file path display
+        self.file_path_display.setAcceptDrops(True)
+        # Set drag enter event handler
+        self.file_path_display.dragEnterEvent = self.on_drag_enter
+        # Set drag move event handler
+        self.file_path_display.dragMoveEvent = self.on_drag_move
+        # Set drop event handler
+        self.file_path_display.dropEvent = self.on_drop
+        file_layout.addWidget(self.file_path_display, 1)
         
-        browse_btn = ttk.Button(file_section, text="Browse", command=self.browse_file, style="Modern.TButton")
-        browse_btn.grid(row=0, column=2, padx=5, pady=5)
+        # Browse button - macOS style
+        browse_button = QPushButton("Browse")
+        browse_button.setFixedHeight(30)
+        browse_button.clicked.connect(self.browse_file)
+        browse_button.setToolTip("Select an audio file to analyze")
+        browse_button.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 15px;
+                font-size: 13px;
+                color: #1d1d1f;
+            }
+            QPushButton:hover {
+                background-color: #c7c7cc;
+            }
+            QPushButton:pressed {
+                background-color: #b8b8bd;
+            }
+        """)
+        file_layout.addWidget(browse_button)
         
-        # BPM interval dropdown (1–10 seconds), default 3
-        self.bpm_interval_var = tk.IntVar(value=3)
-        interval_box = ttk.Combobox(file_section, textvariable=self.bpm_interval_var,
-                                    values=[1,2,3,4,5,6,7,8,9,10], state="readonly", width=4)
-        interval_box.grid(row=0, column=3, padx=5, pady=5)
-        interval_box.bind("<<ComboboxSelected>>", lambda e: self._on_bpm_interval_change())
-        # Initialize mic sampling interval with dropdown value
-        self.mic_bpm_sample_interval = float(self.bpm_interval_var.get())
+        # Segment length dropdown
+        self.segment_selector = QComboBox()
+        self.segment_selector.setFixedHeight(30)
+        # Add interval options (in seconds)
+        self.segment_selector.addItems(["1", "2", "3", "4", "5", "6", "8", "10"])
+        # Default to 3 seconds
+        self.segment_selector.setCurrentText("3")
+        self.segment_selector.setToolTip("Set time interval for BPM calculation")
+        self.segment_selector.setStyleSheet("""
+            QComboBox {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 15px 5px 8px;
+                font-size: 13px;
+                color: #1d1d1f;
+                width: 40px;
+                min-width: 40px;
+                max-width: 40px;
+            }
+            QComboBox:hover {
+                background-color: #c7c7cc;
+            }
+            QComboBox:pressed {
+                background-color: #b8b8bd;
+            }
+            QComboBox::drop-down {
+                border: none;
+                width: 12px;
+                subcontrol-origin: padding;
+                subcontrol-position: right center;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #e5e5ea;
+                border: 1px solid #d2d2d7;
+                border-radius: 6px;
+                selection-background-color: #d2d2d7;
+                selection-color: #1d1d1f;
+                font-size: 13px;
+                outline: none;
+            }
+            QComboBox QAbstractItemView::item {
+                padding: 5px 10px;
+            }
+        """)
+        file_layout.addWidget(self.segment_selector)
         
-        # Calculate BPM button triggers analysis (no auto-analyze on upload)
-        calc_btn = ttk.Button(file_section, text="Calculate BPM", command=self.analyze_file, style="Modern.TButton")
-        calc_btn.grid(row=0, column=4, padx=5, pady=5)
+        # Calculate BPM button - macOS style with accent color
+        calculate_button = QPushButton("Calculate BPM")
+        calculate_button.setFixedHeight(30)
+        calculate_button.clicked.connect(self.analyze_bpm)
+        calculate_button.setToolTip("Calculate BPM for the selected audio file")
+        calculate_button.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 15px;
+                font-size: 13px;
+                color: #1d1d1f;
+            }
+            QPushButton:hover {
+                background-color: #c7c7cc;
+            }
+            QPushButton:pressed {
+                background-color: #b8b8bd;
+            }
+        """)
+        file_layout.addWidget(calculate_button)
         
-        # Analysis results section
-        results_section = ttk.Frame(main_frame, style="Modern.TFrame")
-        results_section.grid(row=1, column=0, columnspan=2, sticky="ew", pady=5, padx=5)
+        main_layout.addWidget(file_section)
         
-        # Create two columns for results
-        results_section.grid_columnconfigure(0, weight=1)
-        results_section.grid_columnconfigure(1, weight=1)
+        # Reference BPM Variation Chart
+        ref_chart_section = QGroupBox("Reference BPM Variation Chart")
+        ref_chart_layout = QVBoxLayout(ref_chart_section)
+        ref_chart_layout.setSpacing(5)
         
-        # Removed BPM and Category displays (no longer needed)
+        # Progress bar for BPM calculation - inside reference chart section
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedHeight(15)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #e5e5ea;
+                border: none;
+                border-radius: 8px;
+                text-align: center;
+                color: #1d1d1f;
+                font-size: 11px;
+            }
+            QProgressBar::chunk {
+                background-color: #007aff;
+                border-radius: 8px;
+            }
+        """)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setMinimumWidth(400)
+        ref_chart_layout.addWidget(self.progress_bar)
+        ref_chart_layout.addSpacing(5)
         
-        # Progress bar (analysis only)
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(results_section, variable=self.progress_var, style="Modern.Horizontal.TProgressbar")
-        self.progress_bar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=5, pady=2)
-        
-        # Reference BPM Chart section
-        ref_viz_section = ttk.LabelFrame(main_frame, text="Reference BPM Variation Chart", style="Modern.TLabelframe")
-        ref_viz_section.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=5, padx=5)
-        
-        # Create matplotlib figure for reference BPM chart
+        # Create matplotlib figure and canvas for reference BPM chart
         self.fig = Figure(figsize=(8, 3), dpi=100)
         self.ax = self.fig.add_subplot(111)
-
-        # Container to keep controls visible and chart flexible
-        ref_container = ttk.Frame(ref_viz_section, style="Modern.TFrame")
-        ref_container.pack(fill=tk.BOTH, expand=True)
-        ref_container.grid_columnconfigure(0, weight=1)
-        ref_container.grid_rowconfigure(0, weight=1)
-        ref_container.grid_rowconfigure(1, weight=0)
-
-        self.canvas = FigureCanvasTkAgg(self.fig, master=ref_container)
-        self.canvas.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        self.canvas.setFixedHeight(200)
+        self.canvas.setStyleSheet("background-color: white; border: 1px solid #d2d2d7; border-radius: 6px;")
+        ref_chart_layout.addWidget(self.canvas)
         
-        # Clear initial plot
+        # Initialize chart
         self.ax.clear()
         self.ax.set_title("BPM Variation Over Time", pad=10)
         self.ax.set_xlabel("Time (seconds)")
         self.ax.set_ylabel("BPM")
         self.ax.grid(True, alpha=0.3)
-        try:
-            self.fig.subplots_adjust(top=0.92, bottom=0.20)
-        except Exception:
-            pass
-        # Increase bottom margin to avoid clipping x-axis label
         self.fig.tight_layout(rect=[0, 0.12, 1, 0.95])
         self.canvas.draw()
         
+        # Chart controls
+        ref_controls = QWidget()
+        ref_controls_layout = QHBoxLayout(ref_controls)
+        ref_controls_layout.setSpacing(5)
         
-        # Add macOS-style playback controls below reference chart
-        ref_controls = ttk.Frame(ref_container, style="Modern.TFrame")
-        ref_controls.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 6))
-        # Unified Play/Pause button with icon for reference audio
-        self.play_button_ref = ttk.Button(ref_controls, command=self.toggle_ref_playback, style="Modern.TButton", width=2)
-        self._update_ref_play_button_icon()
-        self.play_button_ref.pack(side=tk.LEFT, padx=2)
-        # Reset button (icon)
-        self.play_button_ref_reset = ttk.Button(ref_controls, text="↺", command=self._ref_reset, style="Modern.TButton", width=2)
-        self.play_button_ref_reset.pack(side=tk.LEFT, padx=2)
+        # Play button - macOS style
+        self.ref_play_button = QPushButton("▶")
+        self.ref_play_button.setFixedSize(40, 30)
+        self.ref_play_button.clicked.connect(self.toggle_ref_playback)
+        self.ref_play_button.setToolTip("Play/Pause reference BPM playback")
+        self.ref_play_button.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 6px;
+                font-size: 13px;
+                color: #1d1d1f;
+            }
+            QPushButton:hover {
+                background-color: #c7c7cc;
+            }
+            QPushButton:pressed {
+                background-color: #b8b8bd;
+            }
+        """)
+        ref_controls_layout.addWidget(self.ref_play_button)
         
-        # Seek bar and time label for reference audio
-        self.seek_var_ref = tk.DoubleVar(value=0.0)
-        self.seek_scale_ref = ttk.Scale(ref_controls, variable=self.seek_var_ref, from_=0.0, to=0.0, orient=tk.HORIZONTAL, command=lambda v: self._on_seek_ref_live(float(v)))
-        self.seek_scale_ref.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
-        self.seek_scale_ref.bind("<ButtonPress-1>", lambda e: setattr(self, '_ref_is_dragging', True))
-        self.seek_scale_ref.bind("<ButtonRelease-1>", lambda e: self._on_seek_ref(self.seek_var_ref.get()))
-        # Reference playback time label (current / duration)
-        self.time_label_ref = ttk.Label(ref_controls, text="00:00 / 00:00", style="Modern.TLabel")
-        self.time_label_ref.pack(side=tk.LEFT, padx=4)
-        # Reference section detailed data button
-        self.detail_btn_ref = ttk.Button(ref_controls, text="Show Detailed BPM Data", command=self.show_bpm_timeseries, style="Modern.TButton")
-        self.detail_btn_ref.pack(side=tk.LEFT, padx=4)
+        # Reset button - macOS style
+        self.ref_reset_button = QPushButton("⟲")
+        self.ref_reset_button.setFixedSize(40, 30)
+        self.ref_reset_button.clicked.connect(self.reset_ref_playback)
+        self.ref_reset_button.setToolTip("Reset reference BPM playback")
+        self.ref_reset_button.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 6px;
+                font-size: 13px;
+                color: #1d1d1f;
+            }
+            QPushButton:hover {
+                background-color: #c7c7cc;
+            }
+            QPushButton:pressed {
+                background-color: #b8b8bd;
+            }
+        """)
+        ref_controls_layout.addWidget(self.ref_reset_button)
         
-        # Microphone BPM Chart section
-        mic_viz_section = ttk.LabelFrame(main_frame, text="Real-time Microphone BPM Chart", style="Modern.TLabelframe")
-        mic_viz_section.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=5, padx=5)
+        # Progress bar
+        self.ref_progress = QSlider(Qt.Horizontal)
+        self.ref_progress.setRange(0, 100)
+        self.ref_progress.valueChanged.connect(self.on_ref_progress_changed)
+        ref_controls_layout.addWidget(self.ref_progress, 1)
         
-        # Create matplotlib figure for microphone BPM chart
+        # Time label
+        self.ref_time_label = QLabel("00:00 / 00:00")
+        ref_controls_layout.addWidget(self.ref_time_label)
+        
+        # Show detailed data button - macOS style
+        ref_detail_button = QPushButton("Show Detailed BPM Data")
+        ref_detail_button.setToolTip("Show detailed BPM data for the reference file")
+        ref_detail_button.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 10px;
+                font-size: 12px;
+                color: #1d1d1f;
+            }
+            QPushButton:hover {
+                background-color: #c7c7cc;
+            }
+            QPushButton:pressed {
+                background-color: #b8b8bd;
+            }
+        """)
+        ref_detail_button.clicked.connect(self.show_ref_detailed_data)
+        ref_controls_layout.addWidget(ref_detail_button)
+        
+        ref_chart_layout.addWidget(ref_controls)
+        
+        main_layout.addWidget(ref_chart_section)
+        
+        # Real-time Microphone BPM Chart
+        mic_chart_section = QGroupBox("Real-time Microphone BPM Chart")
+        mic_chart_layout = QVBoxLayout(mic_chart_section)
+        mic_chart_layout.setSpacing(5)
+        
+        # Create matplotlib figure and canvas for microphone BPM chart
         self.fig_mic = Figure(figsize=(8, 3), dpi=100)
         self.ax_mic = self.fig_mic.add_subplot(111)
-
-        # Container to keep controls visible and chart flexible
-        mic_container = ttk.Frame(mic_viz_section, style="Modern.TFrame")
-        mic_container.pack(fill=tk.BOTH, expand=True)
-        mic_container.grid_columnconfigure(0, weight=1)
-        mic_container.grid_rowconfigure(0, weight=1)
-        mic_container.grid_rowconfigure(1, weight=0)
-
-        self.canvas_mic = FigureCanvasTkAgg(self.fig_mic, master=mic_container)
-        self.canvas_mic.get_tk_widget().grid(row=0, column=0, sticky="nsew")
+        self.canvas_mic = FigureCanvasQTAgg(self.fig_mic)
+        self.canvas_mic.setFixedHeight(200)
+        self.canvas_mic.setStyleSheet("background-color: white; border: 1px solid #d2d2d7; border-radius: 6px;")
+        mic_chart_layout.addWidget(self.canvas_mic)
         
-        # Clear initial plot for microphone BPM
+        # Initialize microphone chart
         self.ax_mic.clear()
-        self.ax_mic.set_title("Real-time Microphone BPM", pad=10)
+        self.ax_mic.set_title("Real-time Microphone BPM")
         self.ax_mic.set_xlabel("Time")
         self.ax_mic.set_ylabel("BPM")
         self.ax_mic.grid(True, alpha=0.3)
-        try:
-            self.fig_mic.subplots_adjust(top=0.86, bottom=0.22)
-        except Exception:
-            pass
-        # Increase bottom margin to avoid clipping x-axis label
         self.fig_mic.tight_layout(rect=[0, 0.12, 1, 0.92])
         self.canvas_mic.draw()
         
-        # Add macOS-style playback controls below microphone chart
-        mic_controls = ttk.Frame(mic_container, style="Modern.TFrame")
-        mic_controls.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 6))
-        # Use grid to control left-to-right placement and expansion
-        mic_controls.grid_columnconfigure(0, weight=0)
-        mic_controls.grid_columnconfigure(1, weight=0)
-        mic_controls.grid_columnconfigure(2, weight=0)
-        mic_controls.grid_columnconfigure(3, weight=1)
-        mic_controls.grid_columnconfigure(4, weight=0)
-        mic_controls.grid_columnconfigure(5, weight=0)
-        # Mic monitor icon button at far left (narrow)
-        self.mic_button = ttk.Button(mic_controls, text="🎤", command=self.toggle_mic_monitor, style="Modern.TButton", width=5)
-        self.mic_button.grid(row=0, column=0, padx=4)
-        # Mic playback buttons (narrow)
-        self.play_button_mic = ttk.Button(mic_controls, command=self.toggle_mic_playback, style="Modern.TButton", width=2)
-        self._update_mic_play_button_icon()
-        self.play_button_mic.grid(row=0, column=1, padx=2)
-        # Reset button (icon) for microphone playback (narrow)
-        self.play_button_mic_reset = ttk.Button(mic_controls, text="↺", command=self._mic_reset, style="Modern.TButton", width=2)
-        self.play_button_mic_reset.grid(row=0, column=2, padx=4)
-        self.seek_var_mic = tk.DoubleVar(value=0.0)
-        self.seek_scale_mic = ttk.Scale(mic_controls, variable=self.seek_var_mic, from_=0.0, to=0.0, orient=tk.HORIZONTAL, command=lambda v: self._on_seek_mic_live(float(v)))
-        self.seek_scale_mic.grid(row=0, column=3, sticky="ew", padx=6)
-        self.seek_scale_mic.bind("<ButtonPress-1>", lambda e: setattr(self, '_mic_is_dragging', True))
-        self.seek_scale_mic.bind("<ButtonRelease-1>", lambda e: self._on_seek_mic(self.seek_var_mic.get()))
-        # Microphone playback time label (current / duration)
-        self.mic_time_label = ttk.Label(mic_controls, text="00:00 / 00:00", style="Modern.TLabel")
-        self.mic_time_label.grid(row=0, column=4, padx=4)
-        # Microphone section detailed data button
-        self.detail_btn_mic = ttk.Button(mic_controls, text="Show Detailed BPM Data", command=self.show_mic_bpm_timeseries, style="Modern.TButton")
-        self.detail_btn_mic.grid(row=0, column=5, padx=4)
+        # Chart controls
+        mic_controls = QWidget()
+        mic_controls_layout = QHBoxLayout(mic_controls)
+        mic_controls_layout.setSpacing(5)
         
-        # Control buttons section
-        control_section = ttk.Frame(main_frame, style="Modern.TFrame")
-        control_section.grid(row=4, column=0, columnspan=2, sticky="ew", pady=5, padx=5)
-        control_section.grid_columnconfigure(0, weight=1)
-        control_section.grid_columnconfigure(1, weight=1)
-        control_section.grid_columnconfigure(2, weight=1)
+        # Microphone button - macOS style
+        self.mic_button = QPushButton("🎤")
+        self.mic_button.setFixedSize(40, 30)
+        self.mic_button.clicked.connect(self.toggle_microphone)
+        self.mic_button.setToolTip("Toggle microphone recording")
+        self.mic_button.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 6px;
+                font-size: 13px;
+                color: #1d1d1f;
+            }
+            QPushButton:hover {
+                background-color: #c7c7cc;
+            }
+            QPushButton:pressed {
+                background-color: #b8b8bd;
+            }
+        """)
+        mic_controls_layout.addWidget(self.mic_button)
         
-        # Removed global Play and Reset buttons to consolidate controls under reference/mic sections
+        # Play button - macOS style
+        self.mic_play_button = QPushButton("▶")
+        self.mic_play_button.setFixedSize(40, 30)
+        self.mic_play_button.clicked.connect(self.toggle_mic_playback)
+        self.mic_play_button.setToolTip("Play/Pause microphone BPM playback")
+        self.mic_play_button.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 6px;
+                font-size: 13px;
+                color: #1d1d1f;
+            }
+            QPushButton:hover {
+                background-color: #c7c7cc;
+            }
+            QPushButton:pressed {
+                background-color: #b8b8bd;
+            }
+        """)
+        mic_controls_layout.addWidget(self.mic_play_button)
         
-        # Removed global 'Show Detailed BPM Data' button; added per-section buttons in reference and mic controls
+        # Reset button - macOS style
+        self.mic_reset_button = QPushButton("⟲")
+        self.mic_reset_button.setFixedSize(40, 30)
+        self.mic_reset_button.clicked.connect(self.reset_mic_playback)
+        self.mic_reset_button.setToolTip("Reset microphone BPM playback")
+        self.mic_reset_button.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 6px;
+                font-size: 13px;
+                color: #1d1d1f;
+            }
+            QPushButton:hover {
+                background-color: #c7c7cc;
+            }
+            QPushButton:pressed {
+                background-color: #b8b8bd;
+            }
+        """)
+        mic_controls_layout.addWidget(self.mic_reset_button)
         
-        # Microphone monitoring button moved to far left as icon in mic_controls
+        # Progress bar
+        self.mic_progress = QSlider(Qt.Horizontal)
+        self.mic_progress.setRange(0, 100)
+        self.mic_progress.valueChanged.connect(self.on_mic_progress_changed)
+        mic_controls_layout.addWidget(self.mic_progress, 1)
         
-        # BPM comparison button
-        compare_btn = ttk.Button(control_section, text="Compare BPM", command=self.compare_bpm, style="Modern.TButton")
-        compare_btn.grid(row=0, column=1, padx=5, pady=5)
+        # Time label
+        self.mic_time_label = QLabel("00:00 / 00:00")
+        mic_controls_layout.addWidget(self.mic_time_label)
         
-        # Removed global playback time label per UI request
+        # Show detailed data button - macOS style
+        mic_detail_button = QPushButton("Show Detailed BPM Data")
+        mic_detail_button.setToolTip("Show detailed BPM data for microphone recording")
+        mic_detail_button.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 10px;
+                font-size: 12px;
+                color: #1d1d1f;
+            }
+            QPushButton:hover {
+                background-color: #c7c7cc;
+            }
+            QPushButton:pressed {
+                background-color: #b8b8bd;
+            }
+        """)
+        mic_detail_button.clicked.connect(self.show_mic_detailed_data)
+        mic_controls_layout.addWidget(mic_detail_button)
         
-        # Removed bottom summary area (Microphone BPM and Comparison Result) per UI request
-    
-    def _update_play_button_icon(self):
-        """
-        Update the play/pause button label with icon glyphs to keep macOS-style feel
-        """
-        if not hasattr(self, 'play_button'):
-            return
-        # Ensure button style is set and text reflects state with icon
-        if not self.playing:
-            self.play_button.config(text="▶ Play", style="Modern.TButton")
-        else:
-            self.play_button.config(text="⏸ Pause", style="Modern.TButton")
-    
-    def _update_ref_play_button_icon(self):
-        """
-        Update the reference section play/pause button icon based on current context.
-        """
-        if hasattr(self, 'play_button_ref'):
-            if self.playing and getattr(self, 'current_playback_file', None) == getattr(self, 'temp_wav_file', None):
-                self.play_button_ref.config(text="⏸", style="Modern.TButton")
-            else:
-                self.play_button_ref.config(text="▶", style="Modern.TButton")
-    
-    def _update_mic_play_button_icon(self):
-        """
-        Update the microphone section play/pause button icon based on current context.
-        """
-        if hasattr(self, 'play_button_mic'):
-            if self.playing and getattr(self, 'current_playback_file', None) == getattr(self, 'temp_mic_wav_file', None):
-                self.play_button_mic.config(text="⏸", style="Modern.TButton")
-            else:
-                self.play_button_mic.config(text="▶", style="Modern.TButton")
-    
-    def _configure_layout(self):
-        """
-        Configure grid weights and responsive layout
-        """
-        self.root.grid_columnconfigure(0, weight=1)
-        self.root.grid_rowconfigure(0, weight=1)
-    
-    def _on_bpm_interval_change(self):
-        """Sync microphone sampling interval with selected BPM interval."""
-        try:
-            val = float(self.bpm_interval_var.get())
-            self.mic_bpm_sample_interval = val
-        except Exception:
-            pass
+        mic_chart_layout.addWidget(mic_controls)
+        
+        main_layout.addWidget(mic_chart_section)
+        
+        # Bottom compare button
+        self.compare_button = QPushButton("Compare BPM")
+        self.compare_button.setFixedHeight(35)
+        self.compare_button.clicked.connect(self.compare_bpm)
+        self.compare_button.setToolTip("Compare BPM between reference file and microphone recording")
+        self.compare_button.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 16px;
+                font-size: 13px;
+                color: #1d1d1f;
+            }
+            QPushButton:hover {
+                background-color: #c7c7cc;
+            }
+            QPushButton:pressed {
+                background-color: #b8b8bd;
+            }
+        """)
+        main_layout.addWidget(self.compare_button, 0, Qt.AlignCenter)
     
     def browse_file(self):
         """
-        Open file dialog to select audio file
+        Open file dialog to select an audio file
         """
-        file_path = filedialog.askopenfilename(
-            title="Select Audio File",
-            filetypes=[
-                ("Audio Files", "*.mp3 *.wav *.flac *.ogg *.aac *.wma"),
-                ("MP3 Files", "*.mp3"),
-                ("WAV Files", "*.wav"),
-                ("All Files", "*.*")
-            ]
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Audio File",
+            "",
+            "Audio Files (*.wav *.mp3 *.ogg *.flac);;All Files (*.*)"
         )
         
         if file_path:
-            # Reset temporary WAV file and playback state when selecting a new file
-            if hasattr(self, 'temp_wav_file') and self.temp_wav_file and os.path.exists(self.temp_wav_file):
-                try:
-                    os.remove(self.temp_wav_file)
-                    print(f"Removed old temp WAV file: {self.temp_wav_file}")
-                except Exception as e:
-                    print(f"Error removing old temp WAV: {e}")
-            self.temp_wav_file = None
-            self.playing = False
-            self.playback_position = 0
-            self.last_update_time = 0
-            self._update_play_button_icon()
-            
-            self.file_entry.delete(0, tk.END)
-            self.file_entry.insert(0, file_path)
             self.audio_file = file_path
-            
-            # Calculate and display audio duration
-            self._calculate_and_display_duration()
-            
-            print("File loaded. Click 'Calculate BPM' to start analysis.")
-
-
-
+            self.file_path_display.setText(file_path)
     
-    def _calculate_and_display_duration(self):
+    def on_drag_enter(self, event):
         """
-        Calculate audio file duration and display it
+        Handle drag enter event - check if the dragged data contains files
         """
-        try:
-            if not self.audio_file:
-                return
-                
-            # Try to get duration using pydub
-            audio = AudioSegment.from_file(self.audio_file)
-            self.ref_audio_duration = audio.duration_seconds
-            
-            # Format duration as MM:SS
-            minutes = int(self.ref_audio_duration // 60)
-            seconds = int(self.ref_audio_duration % 60)
-            duration_str = f"{minutes:02d}:{seconds:02d}"
-            
-            # Update duration label (label removed; safe-guard)
-            if hasattr(self, 'duration_label'):
-                self.duration_label.config(text=f"Duration: {duration_str}")
-            if hasattr(self, 'time_label'):
-                self.time_label.config(text=f"00:00 / {duration_str}")
-            
-            # Initialize reference chart controls
-            try:
-                if hasattr(self, 'seek_scale_ref'):
-                    self.seek_scale_ref.configure(to=self.ref_audio_duration)
-                    self.seek_var_ref.set(0.0)
-                if hasattr(self, 'time_label_ref'):
-                    self.time_label_ref.config(text=f"00:00 / {duration_str}")
-                # Configure single canvas-based range slider bounds
-                if hasattr(self, 'ref_range_canvas'):
-                    self.ref_range_start_var.set(0.0)
-                    self.ref_range_end_var.set(self.ref_audio_duration)
-                    self.ref_range_start = 0.0
-                    self.ref_range_end = self.ref_audio_duration
-                    if hasattr(self, 'ref_range_label_start'):
-                        self.ref_range_label_start.config(text=self._format_time(self.ref_range_start))
-                    if hasattr(self, 'ref_range_label_end'):
-                        self.ref_range_label_end.config(text=self._format_time(self.ref_range_end))
-                    # Draw slider and markers on load if data exists
-                    try:
-                        self._redraw_range_slider()
-                    except Exception:
-                        pass
-                    if hasattr(self, 'time_bpm_pairs') and self.time_bpm_pairs:
-                        self._create_bpm_chart()
-            except Exception as _:
-                pass
-            
-        except Exception as e:
-            print(f"Error calculating duration: {e}")
-        
-    def _on_ref_range_change(self, kind, value):
-        """Handle changes to the dual-handle range selector under the reference chart."""
-        try:
-            val = float(value)
-        except Exception:
-            return
-        start_val = float(self.ref_range_start_var.get())
-        end_val = float(self.ref_range_end_var.get())
-        if kind == 'start':
-            if val > end_val:
-                self.ref_range_end_var.set(val)
-                end_val = val
-            self.ref_range_start = val
-            self.ref_range_end = end_val
-        else:
-            if val < start_val:
-                self.ref_range_start_var.set(val)
-                start_val = val
-            self.ref_range_start = start_val
-            self.ref_range_end = val
-        # Update labels
-        if hasattr(self, 'ref_range_label_start'):
-            self.ref_range_label_start.config(text=self._format_time(self.ref_range_start))
-        if hasattr(self, 'ref_range_label_end'):
-            self.ref_range_label_end.config(text=self._format_time(self.ref_range_end))
-        # Redraw chart with markers
-        if hasattr(self, 'time_bpm_pairs') and self.time_bpm_pairs:
-            self._create_bpm_chart()
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
     
-    def _redraw_range_slider(self):
-        """Redraw the single canvas-based range slider with one handle (End)."""
-        if not hasattr(self, 'ref_range_canvas'):
-            return
-        try:
-            canvas = self.ref_range_canvas
-            w = max(0, int(canvas.winfo_width()))
-            h = max(24, int(canvas.winfo_height()))
-            margin = 10
-            y = h // 2
-            canvas.delete("all")
-            # Trough
-            canvas.create_line(margin, y, w - margin, y, fill="#cfcfcf", width=4, capstyle=tk.ROUND)
-            duration = float(getattr(self, 'ref_audio_duration', 0.0)) or 0.0
-            usable = max(1, (w - 2 * margin))
-            def x_for(v):
-                v = max(0.0, min(duration, float(v)))
-                return margin + (v / duration * usable) if duration > 0 else margin
-            sx = x_for(getattr(self, 'ref_range_start', 0.0))
-            ex = x_for(getattr(self, 'ref_range_end', 0.0))
-            # Selected range highlight (from fixed Start to movable End)
-            canvas.create_line(sx, y, ex, y, fill="#90CAF9", width=6, capstyle=tk.ROUND)
-            # Single handle at End
-            r = 6
-            canvas.create_oval(ex - r, y - r, ex + r, y + r, fill="#2196F3", outline="")
-        except Exception:
-            pass
-    
-    def _value_from_canvas_x(self, x):
-        """Map a canvas x-coordinate to a time value in seconds."""
-        canvas = getattr(self, 'ref_range_canvas', None)
-        if not canvas:
-            return 0.0
-        w = max(1, int(canvas.winfo_width()))
-        margin = 10
-        duration = float(getattr(self, 'ref_audio_duration', 0.0)) or 0.0
-        usable = max(1, (w - 2 * margin))
-        pos = max(margin, min(w - margin, int(x)))
-        rel = (pos - margin) / usable
-        return max(0.0, min(duration, rel * duration))
-    
-    def _on_range_canvas_press(self, event):
-        """Always select the End handle for single-point control."""
-        self._active_range_handle = 'end'
-    
-    def _on_range_canvas_drag(self, event):
-        """Drag the End handle and update the range/labels/markers."""
-        new_val = self._value_from_canvas_x(event.x)
-        self._on_ref_range_change('end', new_val)
-        try:
-            self._redraw_range_slider()
-        except Exception:
-            pass
-    
-    def analyze_file(self):
+    def on_drag_move(self, event):
         """
-        Start audio file analysis in a separate thread
+        Handle drag move event - allow the drag to continue
+        """
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+    
+    def on_drop(self, event):
+        """
+        Handle drop event - get the file path from the dropped data
+        """
+        if event.mimeData().hasUrls():
+            # Get the first dropped file URL
+            file_url = event.mimeData().urls()[0]
+            # Convert URL to local file path
+            file_path = file_url.toLocalFile()
+            
+            # Check if the file is an audio file
+            audio_extensions = ['.wav', '.mp3', '.ogg', '.flac']
+            if any(file_path.lower().endswith(ext) for ext in audio_extensions):
+                # Set the audio file path
+                self.audio_file = file_path
+                self.file_path_display.setText(file_path)
+                event.acceptProposedAction()
+            else:
+                # Show error message for non-audio files
+                QMessageBox.warning(self, "Error", "Please drop an audio file (.wav, .mp3, .ogg, .flac)")
+    
+    def analyze_bpm(self):
+        """
+        Analyze BPM from the selected audio file
         """
         if not self.audio_file:
-            messagebox.showwarning("Warning", "Please select an audio file first")
+            QMessageBox.information(self, "Information", "Please select an audio file first.")
             return
-            
-        if not os.path.exists(self.audio_file):
-            messagebox.showwarning("Warning", "Selected file does not exist")
+        
+        if self.analyzing:
             return
-            
-        # Disable analyze button during analysis
-        if hasattr(self, 'analyzing') and self.analyzing:
-            return
-            
+        
         self.analyzing = True
+        self.progress_bar.setValue(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.show()
         
-        # Clear previous results (labels may be removed)
-        if hasattr(self, 'bpm_value_label'):
-            self.bpm_value_label.config(text="Analyzing...")
-        if hasattr(self, 'bpm_category_label'):
-            self.bpm_category_label.config(text="Processing audio file...")
-        
-        # Create a new thread for analysis to keep UI responsive
-        analysis_thread = threading.Thread(target=self._analyze_file_thread)
-        analysis_thread.daemon = True
-        analysis_thread.start()
-    
-    def _analyze_file_thread(self):
-        """
-        Thread function for audio file analysis
-        """
-        try:
-            # Load audio file
-            audio = AudioSegment.from_file(self.audio_file)
-            
-            # Convert to mono if stereo
-            if audio.channels > 1:
-                audio = audio.set_channels(1)
-            
-            # Set sample rate to 44.1kHz
-            audio = audio.set_frame_rate(44100)
-            
-            # Convert to numpy array
-            samples = np.array(audio.get_array_of_samples())
-            
-            # Normalize to [-1, 1]
-            max_val = 2 ** (audio.sample_width * 8 - 1)
-            samples = samples.astype(np.float32) / max_val
-            
-            # Analyze in segments (user-selected seconds, no overlap)
+        # Start analysis in a separate thread
+        def analyze_thread():
             try:
-                segment_duration = float(self.bpm_interval_var.get()) if hasattr(self, 'bpm_interval_var') else 3.0
-            except Exception:
-                segment_duration = 3.0
-            segment_samples = int(segment_duration * audio.frame_rate)
-            overlap_samples = 0  # no overlap to enforce cadence for smoother results
-            
-            self.time_bpm_pairs = []
-            
-            # Calculate total segments
-            total_segments = max(1, int((len(samples) - segment_samples) / (segment_samples - overlap_samples)) + 1)
-            
-            for i in range(total_segments):
-                # Calculate segment start and end indices
-                start_idx = i * (segment_samples - overlap_samples)
-                end_idx = start_idx + segment_samples
+                # Load audio file using audio_processing module
+                samples, sample_rate = load_audio_file(self.audio_file)
                 
-                # Ensure we don't go beyond the audio
-                if end_idx > len(samples):
-                    end_idx = len(samples)
-                    start_idx = max(0, end_idx - segment_samples)
+                # Store audio duration
+                self.ref_audio_duration = len(samples) / sample_rate
                 
-                # Extract segment
-                segment = samples[start_idx:end_idx]
+                # Clear previous results
+                self.time_bpm_pairs = []
                 
-                # Calculate segment time in seconds
-                segment_time = start_idx / audio.frame_rate
+                # Get selected segment duration from dropdown
+                segment_duration = float(self.segment_selector.currentText())  # seconds
+                overlap_duration = segment_duration * 0.5  # 50% overlap
                 
-                # Analyze segment
-                bpm = self.analyzer.analyze_audio_segment(segment, audio.frame_rate)
+                # Process audio segments
+                segments = process_audio_segment(samples, sample_rate, segment_duration, overlap_duration)
                 
-                # Add to results
-                self.time_bpm_pairs.append((segment_time, bpm))
+                # Calculate total segments
+                total_segments = len(segments)
                 
-                # Update progress bar
-                progress_percentage = (i + 1) / total_segments * 100
-                self.root.after(0, lambda p=progress_percentage: self.progress_var.set(p))
-            
-            # Calculate overall BPM
-            if self.time_bpm_pairs:
-                bpm_values = [bpm for _, bpm in self.time_bpm_pairs]
-                avg_bpm = np.mean(bpm_values)
+                # Analyze each segment
+                for i, (segment_time, segment) in enumerate(segments):
+                    # Analyze segment BPM
+                    bpm = self.analyzer.analyze_audio_data(segment, sample_rate)
+                    
+                    # Add to results
+                    self.time_bpm_pairs.append((segment_time, bpm))
+                    
+                    # Update progress bar
+                    progress = int(((i + 1) / total_segments) * 100)
+                    QMetaObject.invokeMethod(self.progress_bar, "setValue", Qt.QueuedConnection, Q_ARG(int, progress))
+                    
+                    # Small delay to allow UI updates
+                    time.sleep(0.01)
                 
-                # Update UI with results
-                self.root.after(0, lambda: self._update_bpm_display(avg_bpm))
-                self.root.after(0, self._update_bpm_description)
-                self.root.after(0, self._create_bpm_chart)
-            
-        except Exception as e:
-            print(f"Error in analysis thread: {e}")
-            self.root.after(0, lambda error=str(e): messagebox.showerror("Error", f"Analysis error:\n{error}"))
-        finally:
-            # Reset analyzing flag
-            self.analyzing = False
-            
-            # Set progress to 100% when done
-            self.root.after(0, lambda: self.progress_var.set(100))
-    
-    def _update_bpm_display(self, bpm):
-        """
-        Update BPM value display
-        """
-        # Store reference BPM for comparison
-        self.reference_bpm = bpm
-        
-        # Update label if present
-        if hasattr(self, 'bpm_value_label'):
-            self.bpm_value_label.config(text=f"{bpm:.1f}")
-    
-    def _update_bpm_description(self):
-        """
-        Update BPM category description
-        """
-        if hasattr(self, 'reference_bpm') and self.reference_bpm > 0:
-            description = self.analyzer._bpm_to_category(self.reference_bpm)
-            if hasattr(self, 'bpm_category_label'):
-                self.bpm_category_label.config(text=description)
-    
-    def _create_bpm_chart(self):
-        """
-        Create BPM variation chart using matplotlib
-        """
-        if not hasattr(self, 'time_bpm_pairs') or not self.time_bpm_pairs:
-            return
-            
-        # Clear previous plot
-        self.ax.clear()
-        
-        # Extract data
-        times, bpms = zip(*self.time_bpm_pairs)
-        times_seconds = list(times)  # Use seconds directly
-        
-        # Apply smoothing to BPM values for better visualization
-        smoothed_bpms = self._smooth_bpm_values(bpms)
-        
-        # Plot smoothed BPM curve
-        self.ax.plot(times_seconds, smoothed_bpms, 'b-', linewidth=2, alpha=0.7, label='BPM')
-        
-        # Plot original BPM points
-        self.ax.scatter(times_seconds, bpms, color='r', s=30, alpha=0.5, label='Raw BPM')
-        
-        # Add average BPM line
-        avg_bpm = np.mean(bpms)
-        self.ax.axhline(y=avg_bpm, color='g', linestyle='--', alpha=0.7, label=f'Avg BPM: {avg_bpm:.1f}')
-        
-        # Configure plot
-        self.ax.set_title("BPM Variation Over Time", pad=10)
-        self.ax.set_xlabel("Time (seconds)")
-        self.ax.set_ylabel("BPM")
-        
-        # Set appropriate y-axis limits
-        min_bpm = max(40, np.min(bpms) - 10)
-        max_bpm = min(220, np.max(bpms) + 10)
-        self.ax.set_ylim(min_bpm, max_bpm)
-        
-        # Set x-axis limits to include the full audio duration or data extent
-        try:
-            duration = float(getattr(self, 'ref_audio_duration', 0.0)) or 0.0
-        except Exception:
-            duration = 0.0
-        max_time = max(times_seconds) if times_seconds else 0.0
-        right_limit = duration if duration > 0 else (max_time + 2)
-        if right_limit < 5:
-            right_limit = 5
-        self.ax.set_xlim(0, right_limit)
-        
-        # Add grid and legend
-        self.ax.grid(True, alpha=0.3)
-        self.ax.legend(loc='upper right')
-        
-        # Ensure title is not clipped
-        try:
-            self.fig.subplots_adjust(top=0.92)
-        except Exception:
-            pass
-        # Redraw canvas with safe margins for titles
-        self.fig.tight_layout(rect=[0, 0.03, 1, 0.95])
-        self.canvas.draw()
-    
-    def _smooth_bpm_values(self, bpm_values, window_size=3):
-        """
-        Apply smoothing to BPM values for better visualization
-        """
-        if len(bpm_values) < window_size:
-            return bpm_values
-            
-        # Use Gaussian filter for smoothing
-        smoothed = signal.wiener(bpm_values, window_size)
-        return smoothed
-    
-    def toggle_playback(self):
-        """
-        Toggle audio playback (play/pause)
-        """
-        print("Toggle playback called")
-        if not self.audio_file:
-            messagebox.showwarning("Warning", "Please select an audio file first")
-            print("No audio file selected")
-            return
-            
-        print(f"Audio file: {self.audio_file}")
-        
-        # Check if audio has been analyzed yet
-        if not hasattr(self, 'time_bpm_pairs') or not self.time_bpm_pairs:
-            print("Audio not analyzed yet, performing analysis...")
-            messagebox.showinfo("Info", "Performing BPM analysis first...")
-            # Perform analysis in a blocking way to ensure we have the data
-            if not self.analyzing:
-                # First set up the analyzer variables
-                self.analyzing = True
-                if hasattr(self, 'bpm_value_label'):
-                    self.bpm_value_label.config(text="Analyzing...")
-                if hasattr(self, 'bpm_category_label'):
-                    self.bpm_category_label.config(text="Processing audio file...")
-                
-                try:
-                    # Process the audio file directly
-                    audio = AudioSegment.from_file(self.audio_file)
+                # Calculate average BPM
+                if self.time_bpm_pairs:
+                    bpm_values = [bpm for _, bpm in self.time_bpm_pairs]
+                    avg_bpm = np.mean(bpm_values)
+                    info = f"BPM analysis completed. Detected BPM: {avg_bpm:.1f}"
                     
-                    # Convert to numpy array
-                    samples = np.array(audio.get_array_of_samples())
-                    
-                    # Normalize to [-1, 1]
-                    max_val = 2 ** (audio.sample_width * 8 - 1)
-                    samples = samples.astype(np.float32) / max_val
-                    
-                    # Analyze in segments (3 seconds each, no overlap)
-                    segment_duration = 3.0  # seconds
-                    segment_samples = int(segment_duration * audio.frame_rate)
-                    overlap_samples = 0  # no overlap to enforce 3s cadence
-                    
-                    self.time_bpm_pairs = []
-                    
-                    # Calculate total segments
-                    total_segments = max(1, int((len(samples) - segment_samples) / (segment_samples - overlap_samples)) + 1)
-                    
-                    for i in range(total_segments):
-                        # Calculate segment start and end indices
-                        start_idx = i * (segment_samples - overlap_samples)
-                        end_idx = start_idx + segment_samples
-                        
-                        # Ensure we don't go beyond the audio
-                        if end_idx > len(samples):
-                            end_idx = len(samples)
-                            start_idx = max(0, end_idx - segment_samples)
-                        
-                        # Extract segment
-                        segment = samples[start_idx:end_idx]
-                        
-                        # Calculate segment time in seconds
-                        segment_time = start_idx / audio.frame_rate
-                        
-                        # Analyze segment
-                        bpm = self.analyzer.analyze_audio_segment(segment, audio.frame_rate)
-                        
-                        # Add to results
-                        self.time_bpm_pairs.append((segment_time, bpm))
-                        
-                        # Update progress bar
-                        progress_percentage = (i + 1) / total_segments * 100
-                        self.progress_var.set(progress_percentage)
-                        self.root.update_idletasks()  # Force UI update
-                    
-                    # Calculate overall BPM
-                    if self.time_bpm_pairs:
-                        bpm_values = [bpm for _, bpm in self.time_bpm_pairs]
-                        avg_bpm = np.mean(bpm_values)
-                        
-                        # Update UI with results
-                        self._update_bpm_display(avg_bpm)
-                        self._update_bpm_description()
-                        self._create_bpm_chart()
-                    
-                except Exception as e:
-                    print(f"Error in analysis: {e}")
-                    messagebox.showerror("Error", f"Analysis error:\n{str(e)}")
-                    self.analyzing = False
-                    return
-                finally:
-                    # Reset analyzing flag
-                    self.analyzing = False
-                    # Set progress to 100%
-                    self.progress_var.set(100)
-        
-        if not hasattr(self, 'temp_wav_file') or self.temp_wav_file is None or not os.path.exists(self.temp_wav_file):
-            # Convert audio to WAV for playback if needed
-            try:
-                print("Converting to WAV for playback...")
-                self._convert_to_wav_for_playback()
-                print(f"WAV conversion complete: {self.temp_wav_file}")
+                    # Emit signal to update UI in main thread
+                    self.bpm_result_ready.emit(avg_bpm, info)
             except Exception as e:
-                print(f"Error in conversion: {e}")
-                messagebox.showerror("Error", f"Error preparing audio for playback:\n{str(e)}")
-                return
-        else:
-            print(f"Using existing temp WAV: {self.temp_wav_file}")
+                # Emit signal to show error in main thread
+                self.error_occurred.emit(f"Error analyzing BPM: {str(e)}")
+            finally:
+                # Update flag in thread-safe manner
+                self.analyzing = False
+                # Reset progress bar
+                QMetaObject.invokeMethod(self.progress_bar, "setValue", Qt.QueuedConnection, Q_ARG(int, 0))
         
-        print(f"Current playing state: {self.playing}")
-        if not self.playing:
-            # Start or resume playback
-            print("Starting playback...")
-            self._start_playback()
+        threading.Thread(target=analyze_thread, daemon=True).start()
+    
+    def update_bpm_result(self, bpm, info):
+        """
+        Update BPM result in main thread
+        """
+        # This method will be called from analyze_thread
+        print(f"BPM: {bpm:.1f}")
+        print(f"Info: {info}")
+        
+        # Create BPM chart using ChartManager
+        self.chart_manager.create_bpm_chart(self.ax, self.canvas, self.fig, self.time_bpm_pairs, self.ref_audio_duration)
+    
+    def show_error(self, message):
+        """
+        Show error message in main thread
+        """
+        QMessageBox.critical(self, "Error", message)
+    
+
+    
+    def toggle_microphone(self):
+        """
+        Toggle microphone recording and BPM analysis
+        """
+        # Check if currently playing audio - cannot record while playing
+        if hasattr(self, 'mic_playing') and self.mic_playing:
+            QMessageBox.information(self, "Information", "Cannot record while playing audio. Please stop playback first.")
+            return
+            
+        if not self.mic_recorder.is_recording():
+            # Start microphone recording
+            self.mic_recorder.start_recording()
+            self.mic_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #ff3b30;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 5px 10px;
+                    font-size: 13px;
+                    color: #ffffff;
+                }
+                QPushButton:hover {
+                    background-color: #cc0000;
+                }
+                QPushButton:pressed {
+                    background-color: #990000;
+                }
+            """)
+            
+            # Start processing audio in a separate thread
+            def mic_process_thread():
+                try:
+                    while self.mic_recorder.is_recording():
+                        # Get selected segment duration from dropdown
+                        segment_duration = float(self.segment_selector.currentText())  # seconds
+                        
+                        # Process audio chunk
+                        result = self.mic_recorder.process_audio_chunk(segment_duration)
+                        
+                        if result:
+                            current_time, bpm = result
+                            # Debug: print BPM data
+                            print(f"BPM: {bpm:.1f} at {current_time:.2f}s")
+                            print(f"Total BPM points: {len(self.mic_recorder.mic_time_bpm_pairs)}")
+                            
+                            # Update chart
+                            self._update_mic_bpm_chart()
+                        
+                        # Small delay to reduce CPU usage
+                        time.sleep(0.01)
+                except Exception as e:
+                    print(f"Error in microphone thread: {e}")
+                finally:
+                    # Final chart update
+                    self._update_mic_bpm_chart()
+            
+            threading.Thread(target=mic_process_thread, daemon=True).start()
         else:
-            # Pause playback
-            print("Pausing playback...")
-            self._pause_playback()
+            # Stop microphone recording
+            self.mic_recorder.stop_recording()
+            self.mic_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #e5e5ea;
+                    border: none;
+                    border-radius: 6px;
+                    padding: 5px 10px;
+                    font-size: 13px;
+                    color: #1d1d1f;
+                }
+                QPushButton:hover {
+                    background-color: #d2d2d7;
+                }
+                QPushButton:pressed {
+                    background-color: #c7c7cc;
+                }
+            """)
+            
+            # Final chart update
+            self._update_mic_bpm_chart()
+    
+    def _update_mic_bpm_chart(self):
+        """
+        Update the microphone BPM chart
+        """
+        # Get BPM data from mic recorder
+        mic_time_bpm_pairs = self.mic_recorder.get_bpm_data()
+        
+        # Update the mic_time_bpm_pairs attribute for backward compatibility
+        self.mic_time_bpm_pairs = mic_time_bpm_pairs
+        
+        # Use ChartManager to update the chart
+        self.chart_manager.update_mic_bpm_chart(self.ax_mic, self.canvas_mic, self.fig_mic, mic_time_bpm_pairs)
     
     def toggle_ref_playback(self):
         """
-        Wrapper to play/pause reference audio from the chart controls
+        Toggle playback of the reference audio
         """
         if not self.audio_file:
-            messagebox.showwarning("Warning", "Please select an audio file first")
+            QMessageBox.information(self, "Information", "Please select an audio file first.")
             return
-        # Ensure temp WAV exists
-        if not hasattr(self, 'temp_wav_file') or self.temp_wav_file is None or not os.path.exists(self.temp_wav_file):
-            try:
-                self._convert_to_wav_for_playback()
-            except Exception as e:
-                messagebox.showerror("Error", f"Error preparing audio for playback:\n{str(e)}")
-                return
-        # Set current playback file
-        self.current_playback_file = self.temp_wav_file
-        # Reset any sliced load path and offset
-        self.current_playback_load_path = None
-        self.playback_offset = 0.0
-        # Sync playback_position from reference seek bar before play
-        try:
-            pos = float(self.seek_var_ref.get()) if hasattr(self, 'seek_var_ref') else getattr(self, 'playback_position', 0.0)
-            duration = getattr(self, 'ref_audio_duration', 0.0)
-            self.playback_position = max(0.0, min(pos, duration))
-        except Exception:
-            pass
-        # Update seek range for reference
-        if hasattr(self, 'ref_audio_duration') and hasattr(self, 'seek_scale_ref'):
-            try:
-                self.seek_scale_ref.configure(to=self.ref_audio_duration)
-            except Exception:
-                pass
-        # Delegate to existing toggle
-        self.toggle_playback()
-    
-    def _ref_play(self):
-        """Play or resume reference audio from the chart controls"""
-        if not getattr(self, 'audio_file', None):
-            messagebox.showwarning("Warning", "Please select an audio file first")
-            return
-        # Ensure temp WAV exists
-        if not hasattr(self, 'temp_wav_file') or self.temp_wav_file is None or not os.path.exists(self.temp_wav_file):
-            try:
-                self._convert_to_wav_for_playback()
-            except Exception as e:
-                messagebox.showerror("Error", f"Error preparing audio for playback:\n{str(e)}")
-                return
-        # Set playback source to reference file
-        self.current_playback_file = self.temp_wav_file
-        # Sync playback_position from reference seek bar before play
-        try:
-            pos = float(self.seek_var_ref.get()) if hasattr(self, 'seek_var_ref') else getattr(self, 'playback_position', 0.0)
-            duration = getattr(self, 'ref_audio_duration', 0.0)
-            self.playback_position = max(0.0, min(pos, duration))
-        except Exception:
-            pass
-        # Ensure duration and seek range
-        try:
-            self.ref_audio_duration = AudioSegment.from_file(self.audio_file).duration_seconds
-            if hasattr(self, 'seek_scale_ref'):
-                self.seek_scale_ref.configure(to=self.ref_audio_duration)
-        except Exception:
-            pass
-        # Start or resume
-        self._start_playback()
-    
-    def _ref_pause(self):
-        """Pause reference audio playback"""
-        try:
-            self._pause_playback()
-        except Exception:
-            pass
-    
-    def _ref_reset(self):
-        """Reset reference audio playback position to the start"""
-        if not getattr(self, 'audio_file', None):
-            messagebox.showwarning("Warning", "Please select an audio file first")
-            return
-        # Set playback source to reference and stop
-        self.current_playback_file = getattr(self, 'temp_wav_file', None)
-        try:
-            self._stop_playback()
-        except Exception:
-            pass
-        self.playback_position = 0.0
-        # Refresh duration and UI for reference controls
-        try:
-            self.ref_audio_duration = AudioSegment.from_file(self.audio_file).duration_seconds
-            if hasattr(self, 'seek_var_ref'):
-                self.seek_var_ref.set(0.0)
-            if hasattr(self, 'seek_scale_ref'):
-                self.seek_scale_ref.configure(to=self.ref_audio_duration)
-            if hasattr(self, 'time_label_ref'):
-                duration_str = self._format_time(self.ref_audio_duration)
-                self.time_label_ref.config(text=f"00:00 / {duration_str}")
-            # Also refresh global time label if present
-            if hasattr(self, 'time_label'):
-                self.time_label.config(text=f"00:00 / {self._format_time(self.ref_audio_duration)}")
-        except Exception:
-            pass
-    
-    def _on_seek_ref_live(self, value):
-        """Live update during dragging on reference seek bar (no reload/play)."""
-        try:
-            # Clamp and store position
-            self.playback_position = max(0.0, min(float(value), getattr(self, 'ref_audio_duration', 0.0)))
-            # Keep current playback context to reference
-            if hasattr(self, 'temp_wav_file'):
-                self.current_playback_file = self.temp_wav_file
-            # Update UI time label
-            current_str = self._format_time(self.playback_position)
-            duration_str = self._format_time(getattr(self, 'ref_audio_duration', 0.0))
-            if hasattr(self, 'time_label_ref'):
-                self.time_label_ref.config(text=f"{current_str} / {duration_str}")
-            # Update chart vertical line immediately
-            if hasattr(self, 'time_bpm_pairs') and self.time_bpm_pairs:
-                self._highlight_current_bpm_position(self.playback_position)
-        except Exception as e:
-            print(f"Error in live seek (ref): {e}")
-
-    def _on_seek_ref(self, value):
-        """Seek reference playback to a specific position (seconds)"""
-        try:
-            self.playback_position = max(0.0, min(float(value), getattr(self, 'ref_audio_duration', 0.0)))
-            # Set current playback file to ref when seeking from ref controls
-            if hasattr(self, 'temp_wav_file'):
-                self.current_playback_file = self.temp_wav_file
-            if self.playing:
-                # Prefer direct seek without reloading to avoid interruptions
-                try:
-                    pygame.mixer.music.set_pos(self.playback_position)
-                    # Reset timer baseline to the new position
-                    self.last_update_time = time.time() - self.playback_position
-                except Exception as _:
-                    # Fallback to restart playback at new position
-                    self._start_playback()
+        
+        if not self.audio_player.playing:
+            # Start playback
+            self.ref_play_button.setText("⏸")
+            
+            # Load audio if not already loaded
+            if not hasattr(self.audio_player, 'audio_duration') or self.audio_player.audio_duration == 0:
+                self.audio_player.load_audio(self.audio_file)
+            
+            # Check if we have a saved playback position
+            if self.audio_player.playback_position > 0:
+                # Start playback from saved position
+                self.audio_player.play(start_position=self.audio_player.playback_position)
             else:
-                current_str = self._format_time(self.playback_position)
-                duration_str = self._format_time(getattr(self, 'ref_audio_duration', 0.0))
-                if hasattr(self, 'time_label_ref'):
-                    self.time_label_ref.config(text=f"{current_str} / {duration_str}")
-        except Exception as e:
-            print(f"Error seeking reference: {e}")
-        finally:
+                # Start from beginning
+                self.audio_player.play()
+            
+            # Start update timer
+            self.update_timer = QTimer(self)
+            self.update_timer.timeout.connect(self._update_playback_progress)
+            self.update_timer.start(100)
+        else:
+            # Pause playback
+            self.ref_play_button.setText("▶")
+            self.audio_player.pause()
+            
+            # Stop timer
+            if hasattr(self, 'update_timer'):
+                self.update_timer.stop()
+    
+    def _update_playback_progress(self):
+        """
+        Update playback progress bar and time display
+        """
+        if not self.audio_player.playing:
+            return
+        
+        # Get current playback position from AudioPlayer
+        current_time = self.audio_player.get_current_position()
+        
+        # Update progress bar
+        if hasattr(self, 'ref_audio_duration') and self.ref_audio_duration > 0:
+            progress = min(100, (current_time / self.ref_audio_duration) * 100)
+            self.ref_progress.setValue(int(progress))
+            
+            # Update time display using format_time from utils
+            current_str = format_time(current_time)
+            duration_str = format_time(self.ref_audio_duration)
+            self.ref_time_label.setText(f"{current_str} / {duration_str}")
+            
+            # Update chart indicator using ChartManager
+            self.chart_manager.update_chart_indicator(self.ax, self.canvas, self.time_bpm_pairs, current_time, self)
+        
+        # Check if playback has ended
+        if not self.audio_player.is_playing():
+            self.audio_player.playing = False
+            self.ref_play_button.setText("▶")
+            if hasattr(self, 'update_timer'):
+                self.update_timer.stop()
+            # Remove indicator when playback ends using ChartManager
+            self.chart_manager.clear_chart_indicator(self.ax, self.canvas, self)
+    
+
+    
+    def reset_ref_playback(self):
+        """
+        Reset reference audio playback to beginning
+        """
+        # Stop playback if running
+        self.audio_player.stop()
+        self.ref_play_button.setText("▶")
+        
+        # Stop timer
+        if hasattr(self, 'update_timer'):
+            self.update_timer.stop()
+        
+        # Reset progress
+        self.ref_progress.setValue(0)
+        
+        # Reset time display using format_time from utils
+        duration_str = format_time(self.ref_audio_duration)
+        self.ref_time_label.setText(f"00:00 / {duration_str}")
+        
+        # Remove any real-time indicators from chart using ChartManager
+        self.chart_manager.clear_chart_indicator(self.ax, self.canvas, self)
+        self.canvas.draw()
+    
+    def on_ref_progress_changed(self, value):
+        """
+        Handle progress bar value changes (seeking)
+        """
+        if not hasattr(self, 'ref_audio_duration') or self.ref_audio_duration <= 0:
+            return
+        
+        # Convert slider value (0-100) to seconds
+        new_position = (value / 100) * self.ref_audio_duration
+        
+        # Update playback position in AudioPlayer
+        if self.audio_player.playing:
             try:
-                setattr(self, '_ref_is_dragging', False)
-            except Exception:
-                pass
+                self.audio_player.set_position(new_position)
+            except Exception as e:
+                print(f"Error seeking: {e}")
+        
+        # Update time display using format_time from utils
+        current_str = format_time(new_position)
+        duration_str = format_time(self.ref_audio_duration)
+        self.ref_time_label.setText(f"{current_str} / {duration_str}")
+        
+        # Update chart indicator using ChartManager
+        self.chart_manager.update_chart_indicator(self.ax, self.canvas, self.time_bpm_pairs, new_position, self)
+    
+    def show_ref_detailed_data(self):
+        """
+        Show detailed BPM data for reference audio in a table with MAC style and export functionality
+        """
+        if not hasattr(self, 'time_bpm_pairs') or not self.time_bpm_pairs:
+            QMessageBox.information(self, "Information", "No BPM data available. Please analyze an audio file first.")
+            return
+        
+        # Create a new window to display detailed data
+        from PySide6.QtWidgets import QDialog, QTableWidget, QTableWidgetItem, QVBoxLayout, QHeaderView, QHBoxLayout, QPushButton, QFileDialog
+        from PySide6.QtGui import QColor, QFont
+        import openpyxl
+        from openpyxl.styles import Font, Alignment, Border, Side
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Detailed BPM Data")
+        dialog.setGeometry(200, 200, 900, 600)
+        dialog.setStyleSheet("background-color: #f5f5f7;")
+        
+        # Main layout with padding
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(15)
+        
+        # Create table widget with MAC style
+        table = QTableWidget()
+        table.setRowCount(len(self.time_bpm_pairs))
+        table.setColumnCount(2)
+        
+        # Set column headers
+        table.setHorizontalHeaderLabels(["Time (seconds)", "BPM"])
+        
+        # Configure table appearance
+        table.setStyleSheet("""
+            QTableWidget {
+                background-color: white;
+                border: 1px solid #d2d2d7;
+                border-radius: 8px;
+                gridline-color: #e5e5ea;
+                font-size: 13px;
+            }
+            QTableWidget::item {
+                padding: 10px;
+                border-bottom: 1px solid #f0f0f0;
+            }
+            QTableWidget::item:selected {
+                background-color: #e6f2ff;
+                color: #007aff;
+            }
+            QHeaderView::section {
+                background-color: #f5f5f7;
+                border: none;
+                border-bottom: 1px solid #d2d2d7;
+                padding: 10px;
+                font-weight: bold;
+                font-size: 14px;
+                color: #1d1d1f;
+            }
+            QTableCornerButton::section {
+                background-color: #f5f5f7;
+                border: none;
+                border-bottom: 1px solid #d2d2d7;
+                border-right: 1px solid #d2d2d7;
+            }
+        """)
+        
+        # Set row height for better readability
+        table.verticalHeader().setDefaultSectionSize(35)
+        
+        # Fill table with data
+        for row, (time_seconds, bpm) in enumerate(self.time_bpm_pairs):
+            # Time column
+            time_item = QTableWidgetItem(f"{time_seconds:.2f}")
+            time_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            table.setItem(row, 0, time_item)
+            
+            # BPM column
+            bpm_item = QTableWidgetItem(f"{bpm:.1f}")
+            bpm_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            table.setItem(row, 1, bpm_item)
+        
+        # Set column widths to fit content
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        
+        # Add average BPM row
+        table.insertRow(len(self.time_bpm_pairs))
+        
+        # Average time label (empty)
+        avg_label_item = QTableWidgetItem("Average")
+        avg_label_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        avg_label_item.setForeground(QColor("#007aff"))
+        avg_label_item.setFont(QFont("Helvetica", 13, QFont.Bold))
+        table.setItem(len(self.time_bpm_pairs), 0, avg_label_item)
+        
+        # Average BPM value
+        avg_bpm = np.mean([bpm for _, bpm in self.time_bpm_pairs])
+        avg_bpm_item = QTableWidgetItem(f"{avg_bpm:.1f}")
+        avg_bpm_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        avg_bpm_item.setForeground(QColor("#007aff"))
+        avg_bpm_item.setFont(QFont("Helvetica", 13, QFont.Bold))
+        table.setItem(len(self.time_bpm_pairs), 1, avg_bpm_item)
+        
+        # Function to export data to Excel
+        def export_to_excel():
+            # Get save path from user
+            file_path, _ = QFileDialog.getSaveFileName(
+                dialog, "Export to Excel", 
+                f"bpm_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx", 
+                "Excel Files (*.xlsx);;All Files (*)"
+            )
+            
+            if not file_path:
+                return
+            
+            # Create a new workbook
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            sheet.title = "BPM Data"
+            
+            # Set column headers
+            headers = ["Time (seconds)", "BPM"]
+            for col, header in enumerate(headers, 1):
+                cell = sheet.cell(row=1, column=col)
+                cell.value = header
+                cell.font = Font(bold=True, size=12)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            
+            # Fill sheet with data
+            for row, (time_seconds, bpm) in enumerate(self.time_bpm_pairs, 2):
+                sheet.cell(row=row, column=1, value=time_seconds).alignment = Alignment(horizontal="right", vertical="center")
+                sheet.cell(row=row, column=2, value=bpm).alignment = Alignment(horizontal="right", vertical="center")
+            
+            # Add average BPM row
+            avg_row = len(self.time_bpm_pairs) + 2
+            sheet.cell(row=avg_row, column=1, value="Average").font = Font(bold=True, color="007AFF")
+            sheet.cell(row=avg_row, column=1).alignment = Alignment(horizontal="right", vertical="center")
+            sheet.cell(row=avg_row, column=2, value=avg_bpm).font = Font(bold=True, color="007AFF")
+            sheet.cell(row=avg_row, column=2).alignment = Alignment(horizontal="right", vertical="center")
+            
+            # Auto-adjust column widths
+            for col in sheet.columns:
+                max_length = 0
+                column = col[0].column_letter
+                for cell in col:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 4, 20)
+                sheet.column_dimensions[column].width = adjusted_width
+            
+            # Save the workbook
+            workbook.save(file_path)
+            
+            # Show success message
+            QMessageBox.information(dialog, "Success", f"Data exported successfully to {file_path}")
+        
+        # Create bottom layout with export button
+        bottom_layout = QHBoxLayout()
+        bottom_layout.addStretch()
+        
+        # Export button with MAC style
+        export_button = QPushButton("Export to Excel")
+        export_button.setStyleSheet("""
+            QPushButton {
+                background-color: #007aff;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 20px;
+                font-size: 14px;
+                font-weight: 500;
+                min-width: 150px;
+            }
+            QPushButton:hover {
+                background-color: #0066cc;
+            }
+            QPushButton:pressed {
+                background-color: #0052a3;
+            }
+        """)
+        export_button.clicked.connect(export_to_excel)
+        
+        bottom_layout.addWidget(export_button)
+        
+        # Add widgets to main layout
+        main_layout.addWidget(table)
+        main_layout.addLayout(bottom_layout)
+        
+        dialog.exec()
+    
+    def show_mic_detailed_data(self):
+        """
+        Show detailed BPM data for microphone recording in a table with MAC style and export functionality
+        """
+        if not hasattr(self, 'mic_time_bpm_pairs') or not self.mic_time_bpm_pairs:
+            QMessageBox.information(self, "Information", "No microphone BPM data available. Please start recording first.")
+            return
+        
+        # Create a new window to display detailed data
+        from PySide6.QtWidgets import QDialog, QTableWidget, QTableWidgetItem, QVBoxLayout, QHeaderView, QHBoxLayout, QPushButton, QFileDialog
+        from PySide6.QtGui import QColor, QFont
+        import openpyxl
+        from openpyxl.styles import Font, Alignment, Border, Side
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Detailed Microphone BPM Data")
+        dialog.setGeometry(200, 200, 900, 600)
+        dialog.setStyleSheet("background-color: #f5f5f7;")
+        
+        # Main layout with padding
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(15)
+        
+        # Create table widget with MAC style
+        table = QTableWidget()
+        table.setRowCount(len(self.mic_time_bpm_pairs))
+        table.setColumnCount(2)
+        
+        # Set column headers
+        table.setHorizontalHeaderLabels(["Time (seconds)", "BPM"])
+        
+        # Configure table appearance
+        table.setStyleSheet("""
+            QTableWidget {
+                background-color: white;
+                border: 1px solid #d2d2d7;
+                border-radius: 8px;
+                gridline-color: #e5e5ea;
+                font-size: 13px;
+            }
+            QTableWidget::item {
+                padding: 10px;
+                border-bottom: 1px solid #f0f0f0;
+            }
+            QTableWidget::item:selected {
+                background-color: #e6f2ff;
+                color: #007aff;
+            }
+            QHeaderView::section {
+                background-color: #f5f5f7;
+                border: none;
+                border-bottom: 1px solid #d2d2d7;
+                padding: 10px;
+                font-weight: bold;
+                font-size: 14px;
+                color: #1d1d1f;
+            }
+            QTableCornerButton::section {
+                background-color: #f5f5f7;
+                border: none;
+                border-bottom: 1px solid #d2d2d7;
+                border-right: 1px solid #d2d2d7;
+            }
+        """)
+        
+        # Set row height for better readability
+        table.verticalHeader().setDefaultSectionSize(35)
+        
+        # Fill table with data
+        for row, (time_seconds, bpm) in enumerate(self.mic_time_bpm_pairs):
+            # Time column
+            time_item = QTableWidgetItem(f"{time_seconds:.2f}")
+            time_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            table.setItem(row, 0, time_item)
+            
+            # BPM column
+            bpm_item = QTableWidgetItem(f"{bpm:.1f}")
+            bpm_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            table.setItem(row, 1, bpm_item)
+        
+        # Set column widths to fit content
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        
+        # Add average BPM row
+        table.insertRow(len(self.mic_time_bpm_pairs))
+        
+        # Average time label (empty)
+        avg_label_item = QTableWidgetItem("Average")
+        avg_label_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        avg_label_item.setForeground(QColor("#007aff"))
+        avg_label_item.setFont(QFont("Helvetica", 13, QFont.Bold))
+        table.setItem(len(self.mic_time_bpm_pairs), 0, avg_label_item)
+        
+        # Average BPM value
+        avg_bpm = np.mean([bpm for _, bpm in self.mic_time_bpm_pairs])
+        avg_bpm_item = QTableWidgetItem(f"{avg_bpm:.1f}")
+        avg_bpm_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        avg_bpm_item.setForeground(QColor("#007aff"))
+        avg_bpm_item.setFont(QFont("Helvetica", 13, QFont.Bold))
+        table.setItem(len(self.mic_time_bpm_pairs), 1, avg_bpm_item)
+        
+        # Function to export data to Excel
+        def export_to_excel():
+            # Get save path from user
+            file_path, _ = QFileDialog.getSaveFileName(
+                dialog, "Export to Excel", 
+                f"mic_bpm_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx", 
+                "Excel Files (*.xlsx);;All Files (*)"
+            )
+            
+            if not file_path:
+                return
+            
+            # Create a new workbook
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            sheet.title = "Microphone BPM Data"
+            
+            # Set column headers
+            headers = ["Time (seconds)", "BPM"]
+            for col, header in enumerate(headers, 1):
+                cell = sheet.cell(row=1, column=col)
+                cell.value = header
+                cell.font = Font(bold=True, size=12)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+            
+            # Fill sheet with data
+            for row, (time_seconds, bpm) in enumerate(self.mic_time_bpm_pairs, 2):
+                sheet.cell(row=row, column=1, value=time_seconds).alignment = Alignment(horizontal="right", vertical="center")
+                sheet.cell(row=row, column=2, value=bpm).alignment = Alignment(horizontal="right", vertical="center")
+            
+            # Add average BPM row
+            avg_row = len(self.mic_time_bpm_pairs) + 2
+            sheet.cell(row=avg_row, column=1, value="Average").font = Font(bold=True, color="007AFF")
+            sheet.cell(row=avg_row, column=1).alignment = Alignment(horizontal="right", vertical="center")
+            sheet.cell(row=avg_row, column=2, value=avg_bpm).font = Font(bold=True, color="007AFF")
+            sheet.cell(row=avg_row, column=2).alignment = Alignment(horizontal="right", vertical="center")
+            
+            # Auto-adjust column widths
+            for col in sheet.columns:
+                max_length = 0
+                column = col[0].column_letter
+                for cell in col:
+                    try:
+                        if len(str(cell.value)) > max_length:
+                            max_length = len(str(cell.value))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 4, 20)
+                sheet.column_dimensions[column].width = adjusted_width
+            
+            # Save the workbook
+            workbook.save(file_path)
+            
+            # Show success message
+            QMessageBox.information(dialog, "Success", f"Data exported successfully to {file_path}")
+        
+        # Create bottom layout with export button
+        bottom_layout = QHBoxLayout()
+        bottom_layout.addStretch()
+        
+        # Export button with MAC style
+        export_button = QPushButton("Export to Excel")
+        export_button.setStyleSheet("""
+            QPushButton {
+                background-color: #007aff;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 20px;
+                font-size: 14px;
+                font-weight: 500;
+                min-width: 150px;
+            }
+            QPushButton:hover {
+                background-color: #0066cc;
+            }
+            QPushButton:pressed {
+                background-color: #0052a3;
+            }
+        """)
+        export_button.clicked.connect(export_to_excel)
+        
+        bottom_layout.addWidget(export_button)
+        
+        # Add widgets to main layout
+        main_layout.addWidget(table)
+        main_layout.addLayout(bottom_layout)
+        
+        dialog.exec()
     
     def toggle_mic_playback(self):
         """
-        Toggle play/pause for recorded microphone audio under mic chart.
-        If something else is currently playing, switch to the mic recording instead of pausing.
+        Toggle playback of microphone recorded audio
         """
-        # Validate mic data presence (buffer or recorded file)
-        if not hasattr(self, 'temp_mic_wav_file') or self.temp_mic_wav_file is None:
-            if not hasattr(self, 'mic_buffer') or not self.mic_buffer:
-                messagebox.showwarning("Warning", "No microphone recording available yet")
-                return
-        
-        # Ensure mic WAV exists; otherwise convert buffer
-        if not os.path.exists(getattr(self, 'temp_mic_wav_file', '') or ''):
-            try:
-                self._convert_mic_to_wav_for_playback()
-            except Exception as e:
-                messagebox.showerror("Error", f"Error preparing mic audio for playback:\n{str(e)}")
-                return
-        
-        # Set playback context to mic
-        self.current_playback_file = self.temp_mic_wav_file
-        
-        # Determine accurate duration from the WAV file when available
-        try:
-            with wave.open(self.temp_mic_wav_file, 'rb') as wf:
-                frames = wf.getnframes()
-                rate = wf.getframerate() or float(self.mic_sample_rate)
-                self.mic_audio_duration = frames / float(rate)
-        except Exception:
-            # Fallback to buffer duration
-            self.mic_audio_duration = (len(self.mic_buffer) / float(self.mic_sample_rate)) if hasattr(self, 'mic_buffer') and self.mic_buffer else 0.0
-        # Update seek range for mic
-        if hasattr(self, 'seek_scale_mic'):
-            try:
-                self.seek_scale_mic.configure(to=self.mic_audio_duration)
-            except Exception:
-                pass
-        
-        # Start or pause: if playing a different source, switch to mic recording
-        if not self.playing or (getattr(self, 'current_playback_file', None) != getattr(self, 'temp_mic_wav_file', None)):
-            # Preserve current position or use mic seek value when switching context
-            try:
-                pos = float(self.seek_var_mic.get()) if hasattr(self, 'seek_var_mic') else getattr(self, 'playback_position', 0.0)
-                duration = getattr(self, 'mic_audio_duration', 0.0)
-                self.playback_position = max(0.0, min(pos, duration))
-            except Exception:
-                pass
-            self._start_playback()
-        else:
-            self._pause_playback()
-    
-    def _on_seek_mic_live(self, value):
-        """Live update during dragging on microphone seek bar (no reload/play)."""
-        try:
-            duration = getattr(self, 'mic_audio_duration', 0.0)
-            # Clamp and store position using current audio duration
-            self.playback_position = max(0.0, min(float(value), duration))
-            # Keep current playback context to mic
-            if hasattr(self, 'temp_mic_wav_file'):
-                self.current_playback_file = self.temp_mic_wav_file
-            # Update UI time label
-            current_str = self._format_time(self.playback_position)
-            duration_str = self._format_time(duration)
-            if hasattr(self, 'mic_time_label'):
-                self.mic_time_label.config(text=f"{current_str} / {duration_str}")
-            # Update mic chart vertical line immediately if data exists
-            if hasattr(self, 'mic_time_bpm_pairs') and self.mic_time_bpm_pairs:
-                try:
-                    self._highlight_current_mic_bpm_position(self.playback_position)
-                except Exception:
-                    pass
-        except Exception as e:
-            print(f"Error in live seek (mic): {e}")
-
-    def _on_seek_mic(self, value):
-        """Seek microphone playback to a specific position (seconds)"""
-        try:
-            duration = getattr(self, 'mic_audio_duration', 0.0)
-            self.playback_position = max(0.0, min(float(value), duration))
-            # Ensure current file is mic
-            if hasattr(self, 'temp_mic_wav_file'):
-                self.current_playback_file = self.temp_mic_wav_file
-            if self.playing:
-                # Prefer direct seek without reloading to avoid interruptions
-                try:
-                    pygame.mixer.music.set_pos(self.playback_position)
-                    # Reset timer baseline to the new position
-                    self.last_update_time = time.time() - self.playback_position
-                except Exception:
-                    # Fallback to restart playback at new position
-                    self._start_playback()
-            else:
-                current_str = self._format_time(self.playback_position)
-                duration_str = self._format_time(duration)
-                if hasattr(self, 'mic_time_label'):
-                    self.mic_time_label.config(text=f"{current_str} / {duration_str}")
-        except Exception as e:
-            print(f"Error seeking microphone: {e}")
-        finally:
-            try:
-                setattr(self, '_mic_is_dragging', False)
-            except Exception:
-                pass
-    
-    def _mic_reset(self):
-        """Reset microphone playback position to the start and update UI."""
-        try:
-            # Allow mic reset even when no recording is available; do not block
-            # Duration and UI will be updated best-effort below.
-
-            # Flip playback context to mic if we have a temp wav prepared
-            self.current_playback_file = getattr(self, 'temp_mic_wav_file', None)
-
-            # Stop any ongoing playback
-            try:
-                self._stop_playback()
-            except Exception:
-                pass
-
-            # Reset core playback state
-            self.playback_position = 0.0
-
-            # Compute mic duration for label
-            mic_duration = 0.0
-            try:
-                if hasattr(self, 'mic_sample_rate') and self.mic_sample_rate:
-                    mic_duration = float(len(self.mic_buffer)) / float(self.mic_sample_rate)
-            except Exception:
-                mic_duration = 0.0
-
-            # Update mic seek and time label
-            try:
-                if hasattr(self, 'seek_var_mic'):
-                    self.seek_var_mic.set(0.0)
-                if hasattr(self, 'mic_time_label'):
-                    self.mic_time_label.config(text=f"00:00 / {self._format_time(mic_duration)}")
-            except Exception:
-                pass
-
-            # Keep icons consistent
-            try:
-                self._update_play_button_icon()
-                self._update_ref_play_button_icon()
-                self._update_mic_play_button_icon()
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"Mic reset failed: {e}")
- 
-    def _convert_mic_to_wav_for_playback(self):
-        """Convert mic buffer to a temporary WAV file for playback"""
-        try:
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            self.temp_mic_wav_file = f"temp_mic_playback_{timestamp}.wav"
-            samples = np.array(self.mic_buffer, dtype=np.float32)
-            samples = np.clip(samples, -1.0, 1.0)
-            samples_int16 = (samples * 32767).astype(np.int16)
-            audio = AudioSegment(
-                data=samples_int16.tobytes(),
-                sample_width=2,
-                frame_rate=self.mic_sample_rate,
-                channels=1
-            )
-            audio.export(self.temp_mic_wav_file, format="wav")
-        except Exception as e:
-            if hasattr(self, 'temp_mic_wav_file') and self.temp_mic_wav_file and os.path.exists(self.temp_mic_wav_file):
-                try:
-                    os.remove(self.temp_mic_wav_file)
-                except:
-                    pass
-            self.temp_mic_wav_file = None
-            raise e
-    
-    def _convert_to_wav_for_playback(self):
-        """
-        Convert audio file to temporary WAV file for playback
-        """
-        try:
-            # Generate unique temporary filename
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            self.temp_wav_file = f"temp_playback_{timestamp}.wav"
-            
-            # Convert to WAV using pydub
-            audio = AudioSegment.from_file(self.audio_file)
-            audio.export(self.temp_wav_file, format="wav")
-            
-        except Exception as e:
-            # Clean up on error
-            if hasattr(self, 'temp_wav_file') and os.path.exists(self.temp_wav_file):
-                try:
-                    os.remove(self.temp_wav_file)
-                except:
-                    pass
-            self.temp_wav_file = None
-            raise e
-    
-    def _start_playback(self):
-        """
-        Start audio playback
-        """
-        try:
-            print(f"Starting playback with file: {self.current_playback_file or self.temp_wav_file}")
-            print(f"Playback position: {self.playback_position} seconds")
-            
-            pygame.mixer.music.stop()
-            print("Stopped any current playback to reset state")
-            
-            pygame.mixer.music.load(self.current_playback_file if hasattr(self, 'current_playback_file') and self.current_playback_file else self.temp_wav_file)
-            print("Music loaded")
-            
-            pygame.mixer.music.play()
-            print("Playback started")
-            
-            if self.playback_position > 0:
-                try:
-                    print(f"Trying to set position to {self.playback_position} seconds")
-                    pygame.mixer.music.set_pos(self.playback_position)
-                    print("Position set successfully")
-                except pygame.error as e:
-                    print(f"Warning: Failed to set position: {e}")
-                    print("Continuing from beginning instead")
-            
-            if pygame.mixer.music.get_busy():
-                print("Playback verification successful: music is playing")
-                print("Updating playback state...")
-                self.playing = True
-                self.last_update_time = time.time() - self.playback_position
-                
-                print("Starting update timer...")
-                self._update_timer()
-                
-                print("Updating play button icon...")
-                self._update_play_button_icon()
-                self._update_ref_play_button_icon()
-                self._update_mic_play_button_icon()
-            else:
-                print("Error: Music is not playing after play()")
-                self.playing = False
-                self._update_play_button_icon()
-                self._update_ref_play_button_icon()
-                self._update_mic_play_button_icon()
-            
-        except Exception as e:
-            print(f"Error starting playback: {e}")
-            print(f"Exception type: {type(e).__name__}")
-            self._stop_playback()
-            messagebox.showerror("Error", f"Playback error:\n{str(e)}")
-    
-    def _pause_playback(self):
-        """
-        Pause audio playback
-        """
-        try:
-            # Get current position
-            self.playback_position = pygame.mixer.music.get_pos() / 1000.0  # Convert to seconds
-            
-            # Pause playback
-            pygame.mixer.music.pause()
-            
-            # Update state
-            self.playing = False
-            
-            # Stop timer
-            if self.update_timer_id:
-                self.root.after_cancel(self.update_timer_id)
-                self.update_timer_id = None
-            
-            # Update play button icon
-            self._update_play_button_icon()
-            self._update_ref_play_button_icon()
-            self._update_mic_play_button_icon()
-            
-        except Exception as e:
-            print(f"Error pausing playback: {e}")
-    
-    def reset_playback(self):
-        """
-        Reset audio playback to beginning
-        """
-        # Stop playback if running
-        self._stop_playback()
-        
-        # Reset position
-        self.playback_position = 0
-        
-        # Update time labels separately for reference and mic
-        minutes = int(getattr(self, 'ref_audio_duration', 0.0) // 60) if hasattr(self, 'ref_audio_duration') else 0
-        seconds = int(getattr(self, 'ref_audio_duration', 0.0) % 60) if hasattr(self, 'ref_audio_duration') else 0
-        duration_str_ref = f"{minutes:02d}:{seconds:02d}"
-        minutes = int(getattr(self, 'mic_audio_duration', 0.0) // 60) if hasattr(self, 'mic_audio_duration') else 0
-        seconds = int(getattr(self, 'mic_audio_duration', 0.0) % 60) if hasattr(self, 'mic_audio_duration') else 0
-        duration_str_mic = f"{minutes:02d}:{seconds:02d}"
-        if hasattr(self, 'time_label'):
-            try:
-                if hasattr(self, 'current_playback_file') and hasattr(self, 'temp_mic_wav_file') and self.current_playback_file == self.temp_mic_wav_file:
-                    self.time_label.config(text=f"00:00 / {duration_str_mic}")
-                else:
-                    self.time_label.config(text=f"00:00 / {duration_str_ref}")
-            except Exception:
-                self.time_label.config(text=f"00:00 / {duration_str_ref}")
-        # Reset chart-specific labels and seek bars
-        try:
-            if hasattr(self, 'seek_scale_ref'):
-                self.seek_var_ref.set(0.0)
-            if hasattr(self, 'time_label_ref'):
-                self.time_label_ref.config(text=f"00:00 / {duration_str_ref}")
-            if hasattr(self, 'seek_scale_mic'):
-                self.seek_var_mic.set(0.0)
-            if hasattr(self, 'mic_time_label'):
-                self.mic_time_label.config(text=f"00:00 / {duration_str_mic}")
-        except Exception as _:
-            pass
-    
-    def _stop_playback(self):
-        """
-        Stop audio playback completely
-        """
-        try:
-            # Stop playback
-            pygame.mixer.music.stop()
-            
-            # Update state
-            self.playing = False
-            
-            # Stop timer
-            if self.update_timer_id:
-                self.root.after_cancel(self.update_timer_id)
-                self.update_timer_id = None
-            
-            # Update play button icon
-            self._update_play_button_icon()
-            
-        except Exception as e:
-            print(f"Error stopping playback: {e}")
-    
-    def _update_timer(self):
-        """
-        Update playback timer and progress bar
-        """
-        if not self.playing:
+        # Check if currently recording - cannot play while recording
+        if hasattr(self, 'mic_recording') and self.mic_recording:
+            QMessageBox.information(self, "Information", "Cannot play audio while recording. Please stop recording first.")
             return
             
+        if not hasattr(self, 'mic_time_bpm_pairs') or not self.mic_time_bpm_pairs:
+            QMessageBox.information(self, "Information", "No microphone BPM data available. Please start recording first.")
+            return
+        
+        if not hasattr(self, 'mic_playing'):
+            self.mic_playing = False
+        
+        # Always convert the latest microphone data to WAV for playback
         try:
-            # Calculate current position
-            current_time = time.time() - self.last_update_time
-            # Avoid overwriting user-controlled position while dragging
-            if not getattr(self, '_ref_is_dragging', False) and not getattr(self, '_mic_is_dragging', False):
-                self.playback_position = current_time
-            
-            # Format time strings
-            current_str = self._format_time(current_time)
-            # Choose duration based on current playback context
-            if hasattr(self, 'current_playback_file') and hasattr(self, 'temp_wav_file') and self.current_playback_file == self.temp_wav_file:
-                duration_str = self._format_time(getattr(self, 'ref_audio_duration', 0.0))
-            elif hasattr(self, 'current_playback_file') and hasattr(self, 'temp_mic_wav_file') and self.current_playback_file == self.temp_mic_wav_file:
-                duration_str = self._format_time(getattr(self, 'mic_audio_duration', 0.0))
-            else:
-                duration_str = self._format_time(getattr(self, 'ref_audio_duration', 0.0))
-            
-            # Update time label
-            if hasattr(self, 'time_label'):
-                self.time_label.config(text=f"{current_str} / {duration_str}")
-            
-            # Do not update progress bar during playback per UI request
-            # Progress bar will only reflect analysis progress elsewhere
-            
-            # Update chart-specific time labels and seek bars
-            try:
-                if hasattr(self, 'current_playback_file') and hasattr(self, 'temp_wav_file') and self.current_playback_file == self.temp_wav_file:
-                    if not getattr(self, '_ref_is_dragging', False):
-                        if hasattr(self, 'seek_scale_ref'):
-                            self.seek_scale_ref.configure(to=getattr(self, 'ref_audio_duration', 0.0))
-                            self.seek_var_ref.set(current_time)
-                        if hasattr(self, 'time_label_ref'):
-                            self.time_label_ref.config(text=f"{current_str} / {duration_str}")
-                elif hasattr(self, 'current_playback_file') and hasattr(self, 'temp_mic_wav_file') and self.current_playback_file == self.temp_mic_wav_file:
-                    if not getattr(self, '_mic_is_dragging', False):
-                        if hasattr(self, 'seek_scale_mic'):
-                            self.seek_scale_mic.configure(to=getattr(self, 'mic_audio_duration', 0.0))
-                            self.seek_var_mic.set(current_time)
-                        if hasattr(self, 'mic_time_label'):
-                            self.mic_time_label.config(text=f"{current_str} / {duration_str}")
-            except Exception as _:
-                pass
-            
-            # Update BPM chart progress lines according to current playback source
-            try:
-                if hasattr(self, 'current_playback_file') and hasattr(self, 'temp_wav_file') and self.current_playback_file == self.temp_wav_file:
-                    if hasattr(self, 'time_bpm_pairs') and self.time_bpm_pairs:
-                        if not getattr(self, '_ref_is_dragging', False):
-                            self._highlight_current_bpm_position(current_time)
-                elif hasattr(self, 'current_playback_file') and hasattr(self, 'temp_mic_wav_file') and self.current_playback_file == self.temp_mic_wav_file:
-                        if hasattr(self, 'mic_time_bpm_pairs') and self.mic_time_bpm_pairs:
-                            if not getattr(self, '_mic_is_dragging', False):
-                                self._highlight_current_mic_bpm_position(current_time)
-            except Exception:
-                pass
-            
-            # Schedule next update
-            self.update_timer_id = self.root.after(100, self._update_timer)
-            
-            # Check if playback has ended
-            if not pygame.mixer.music.get_busy():
-                self._stop_playback()
-                
+            self._convert_mic_to_wav_for_playback()
         except Exception as e:
-            print(f"Error updating timer: {e}")
+            QMessageBox.critical(self, "Error", f"Error preparing microphone audio for playback: {str(e)}")
+            return
+        
+        if not self.mic_playing:
+            # Start playback
+            self.mic_playing = True
+            self.mic_play_button.setText("⏸")
+            
+            # Initialize playback parameters if not already set
+            if not hasattr(self, 'mic_playback_position') or self.mic_playback_position < 0:
+                self.mic_playback_position = 0
+            
+            # Start playback
+            pygame.mixer.music.load(self.temp_mic_wav_file)
+            if self.mic_playback_position > 0:
+                # Start playback from saved position
+                pygame.mixer.music.play(start=self.mic_playback_position)
+                self.mic_last_update_time = time.time() - self.mic_playback_position
+            else:
+                # Start playback from beginning
+                pygame.mixer.music.play()
+                self.mic_last_update_time = time.time()
+            
+            # Start timer for updating progress
+            self.mic_update_timer = QTimer(self)
+            self.mic_update_timer.timeout.connect(self._update_mic_playback_progress)
+            self.mic_update_timer.start(100)
+        else:
+            # Pause playback
+            self.mic_playing = False
+            self.mic_play_button.setText("▶")
+            
+            # Save current playback position
+            self.mic_playback_position = time.time() - self.mic_last_update_time
+            
+            # Pause the audio
+            pygame.mixer.music.pause()
+            
+            # Stop timer
+            if hasattr(self, 'mic_update_timer'):
+                self.mic_update_timer.stop()
     
-    def _highlight_current_bpm_position(self, current_time):
+    def _convert_mic_to_wav_for_playback(self):
         """
-        Highlight the current playback position on the BPM chart
-        and update the current BPM display
+        Convert microphone recorded data to WAV file for playback
         """
-        # Find the current BPM segment
+        # Get microphone data from MicRecorder instance
+        audio_data = self.mic_recorder.get_audio_data()
+        
+        if len(audio_data) == 0:
+            raise ValueError("No microphone data available for playback")
+        
+        import wave
+        
+        # Create temporary WAV file
+        from datetime import datetime
+        self.temp_mic_wav_file = f"temp_mic_playback_{datetime.now().strftime('%Y%m%d_%H%M%S')}.wav"
+        
+        # Calculate actual audio duration in seconds
+        self.mic_audio_duration = len(audio_data) / self.mic_sample_rate
+        
+        # Normalize audio data to int16 range (-32768 to 32767)
+        audio_data = np.clip(audio_data * 32767, -32768, 32767).astype(np.int16)
+        
+        # Save as WAV file
+        with wave.open(self.temp_mic_wav_file, 'wb') as wf:
+            wf.setnchannels(1)  # Mono
+            wf.setsampwidth(2)  # 2 bytes per sample (int16)
+            wf.setframerate(self.mic_sample_rate)
+            wf.writeframes(audio_data.tobytes())
+    
+    def _update_mic_playback_progress(self):
+        """
+        Update microphone playback progress bar and time display
+        """
+        if not self.mic_playing:
+            return
+        
+        # Calculate current playback position
+        current_time = time.time() - self.mic_last_update_time
+        self.mic_playback_position = current_time
+        
+        # Update progress bar
+        if self.mic_audio_duration > 0:
+            progress = min(100, (current_time / self.mic_audio_duration) * 100)
+            self.mic_progress.setValue(int(progress))
+            
+            # Update time display
+            current_str = format_time(current_time)
+            duration_str = format_time(self.mic_audio_duration)
+            self.mic_time_label.setText(f"{current_str} / {duration_str}")
+        
+        # Update chart indicator
+        self._update_mic_chart_indicator(current_time)
+        
+        # Check if playback has ended (either by duration or pygame indicating it's done)
+        if current_time >= self.mic_audio_duration or not pygame.mixer.music.get_busy():
+            self.reset_mic_playback()
+    
+    def reset_mic_playback(self):
+        """
+        Reset microphone playback to beginning
+        """
+        # Stop playback if running
+        self.mic_playing = False
+        self.mic_play_button.setText("▶")
+        
+        # Stop audio playback
+        pygame.mixer.music.stop()
+        
+        # Stop timer
+        if hasattr(self, 'mic_update_timer'):
+            self.mic_update_timer.stop()
+        
+        # Reset progress
+        self.mic_progress.setValue(0)
+        
+        # Reset time display
+        duration_str = format_time(self.mic_audio_duration)
+        self.mic_time_label.setText(f"00:00 / {duration_str}")
+        
+        # Reset playback position
+        self.mic_playback_position = 0
+        
+        # Remove any real-time indicators from chart
+        if hasattr(self, '_mic_current_bpm_line'):
+            try:
+                self._mic_current_bpm_line.remove()
+                if hasattr(self, '_mic_current_bpm_text'):
+                    self._mic_current_bpm_text.remove()
+                delattr(self, '_mic_current_bpm_line')
+                delattr(self, '_mic_current_bpm_text')
+            except:
+                pass
+        self.canvas_mic.draw()
+    
+    def on_mic_progress_changed(self, value):
+        """
+        Handle microphone progress bar value changes (seeking)
+        """
+        if not hasattr(self, 'mic_audio_duration') or self.mic_audio_duration <= 0:
+            return
+        
+        # Convert slider value (0-100) to seconds
+        new_position = (value / 100) * self.mic_audio_duration
+        
+        # Update playback position
+        self.mic_playback_position = new_position
+        
+        # Update time display
+        current_str = format_time(new_position)
+        duration_str = format_time(self.mic_audio_duration)
+        self.mic_time_label.setText(f"{current_str} / {duration_str}")
+        
+        # Update last_update_time to match new position if playing
+        if hasattr(self, 'mic_playing') and self.mic_playing:
+            self.mic_last_update_time = time.time() - new_position
+        
+        # Update chart indicator
+        self._update_mic_chart_indicator(new_position)
+    
+    def _update_mic_chart_indicator(self, current_time):
+        """
+        Update the real-time BPM indicator on the microphone chart
+        """
+        if not hasattr(self, 'mic_time_bpm_pairs') or not self.mic_time_bpm_pairs:
+            return
+        
+        # Find current BPM based on time
         current_bpm = None
-        for time_seconds, bpm in self.time_bpm_pairs:
+        for time_seconds, bpm in self.mic_time_bpm_pairs:
             if time_seconds > current_time:
                 break
             current_bpm = bpm
         
-        # Update current BPM display if found
-        if current_bpm is not None:
-            # Update current BPM label only if original label exists
-            if hasattr(self, 'bpm_value_label'):
-                if not hasattr(self, 'current_bpm_label'):
-                    self.current_bpm_label = ttk.Label(self.bpm_value_label.master, text="", style="Description.TLabel")
-                    self.current_bpm_label.pack(pady=2)
-                self.current_bpm_label.config(text=f"Current: {current_bpm:.1f}")
-            
-            # Find the index in our time_bpm_pairs for the current segment
-            times, bpms = zip(*self.time_bpm_pairs)
-            current_idx = 0
-            for i, t in enumerate(times):
-                if t > current_time:
-                    break
-                current_idx = i
-            
-            # Update the chart with a vertical line
-            # First, clear any existing vertical line
-            for line in getattr(self, '_vline', []):
-                line.remove()
-            
-            # Add new vertical line at current time (seconds)
-            self._vline = [self.ax.axvline(x=current_time, color='red', linestyle=':', alpha=0.8)]
-            
-            # Add a text label showing current BPM near the vertical line
-            y_min, y_max = self.ax.get_ylim()
-            text_y_pos = y_min + (y_max - y_min) * 0.9
-            self._vline.append(self.ax.text(current_time + 0.01, text_y_pos, 
-                               f"{current_bpm:.1f} BPM", color='red', alpha=0.8))
-            
-            # Redraw the canvas
-            self.canvas.draw()
-    
-    def _highlight_current_mic_bpm_position(self, current_time):
-        try:
-            if not hasattr(self, 'mic_time_bpm_pairs') or not self.mic_time_bpm_pairs:
-                return
-            if not hasattr(self, 'ax_mic') or not hasattr(self, 'canvas_mic'):
-                return
-            times, bpms = zip(*self.mic_time_bpm_pairs)
-            closest_idx = min(range(len(times)), key=lambda i: abs(times[i] - current_time))
-            # Remove previous mic vertical line(s)
-            if hasattr(self, '_vline_mic') and self._vline_mic:
-                for line in self._vline_mic:
-                    try:
-                        line.remove()
-                    except Exception:
-                        pass
-                self._vline_mic = []
-            self._vline_mic = [self.ax_mic.axvline(x=current_time, color='red', linestyle=':', alpha=0.8)]
-            # Add a text label showing current mic BPM near the vertical line
-            y_min, y_max = self.ax_mic.get_ylim()
-            text_y_pos = y_min + (y_max - y_min) * 0.9
-            current_bpm = bpms[closest_idx]
-            self._vline_mic.append(self.ax_mic.text(current_time + 0.01, text_y_pos, f"{current_bpm:.1f} BPM", color='red', alpha=0.8))
-            self.canvas_mic.draw()
-        except Exception:
-            pass
-
-    def _format_time(self, seconds):
-        """
-        Format time in seconds to MM:SS format
-        """
-        minutes = int(seconds // 60)
-        secs = int(seconds % 60)
-        return f"{minutes:02d}:{secs:02d}"
-    
-    def toggle_mic_monitor(self):
-        """
-        Toggle microphone monitoring for real-time BPM detection
-        """
-        if not self.mic_recording:
-            self._start_mic_monitoring()
-        else:
-            self._stop_mic_monitoring()
-    
-    def _start_mic_monitoring(self):
-        """
-        Start microphone monitoring thread and begin real-time WAV recording.
-        """
-        try:
-            # Update button text (mic-off icon)
-            self.mic_button.config(text="🚫🎤")
-            
-            # Update state
-            self.mic_recording = True
-            self.mic_buffer = []
-            self.mic_bpm_history = []
-            
-            # Initialize time tracking and BPM data for immediate chart display
-            self.mic_start_time = time.time()
-            self.mic_time_bpm_pairs = [(0, 0)]  # Add initial data point for immediate chart display
-            # Set mic BPM sampling interval from the user-selected dropdown (seconds)
-            try:
-                self.mic_bpm_sample_interval = float(self.bpm_interval_var.get())
-            except Exception:
-                # Fallback to previous value or default 3.0 if dropdown not available
-                self.mic_bpm_sample_interval = float(getattr(self, 'mic_bpm_sample_interval', 3.0))
-            self.mic_last_bpm_sample_ts = self.mic_start_time
-            print(f"Mic sampling interval set to {self.mic_bpm_sample_interval} seconds")
-            
-            # Prepare real-time WAV recording
-            try:
-                timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-                self.temp_mic_wav_file = f"mic_recording_{timestamp}.wav"
-                self.mic_writer_lock = threading.Lock()
-                self.mic_wave_writer = wave.open(self.temp_mic_wav_file, 'wb')
-                self.mic_wave_writer.setnchannels(1)
-                self.mic_wave_writer.setsampwidth(2)  # 16-bit PCM
-                self.mic_wave_writer.setframerate(self.mic_sample_rate)
-            except Exception as e:
-                print(f"Error preparing real-time mic WAV writer: {e}")
-                self.mic_wave_writer = None
-                self.mic_writer_lock = None
-            
-            # Start monitoring thread
-            self.mic_thread = threading.Thread(target=self._mic_monitor_thread)
-            self.mic_thread.daemon = True
-            self.mic_thread.start()
-            
-            # Immediately update chart to show empty state with fixed axes
-            self.root.after(0, self._update_mic_bpm_chart)
-            
-        except Exception as e:
-            print(f"Error starting mic monitoring: {e}")
-            messagebox.showerror("Error", f"Failed to start microphone monitoring:\n{str(e)}")
-            self._stop_mic_monitoring()
-    
-    def _stop_mic_monitoring(self):
-        """
-        Stop microphone monitoring, save BPM information, and perform final BPM analysis
-        """
-        # Update button text (mic icon)
-        self.mic_button.config(text="🎤")
+        if current_bpm is None:
+            return
         
-        # Update state
-        self.mic_recording = False
-
-        # Finalize WAV recording
-        if getattr(self, 'mic_wave_writer', None) is not None:
+        # Remove previous indicator if exists
+        if hasattr(self, '_mic_current_bpm_line'):
             try:
-                if getattr(self, 'mic_writer_lock', None) is not None:
-                    with self.mic_writer_lock:
-                        self.mic_wave_writer.close()
-                else:
-                    self.mic_wave_writer.close()
-            except Exception as e:
-                print(f"Error closing mic WAV writer: {e}")
-            finally:
-                self.mic_wave_writer = None
-        
-        # Stop stream if it exists
-        if hasattr(self, 'mic_stream') and self.mic_stream:
-            try:
-                self.mic_stream.stop()
-                self.mic_stream.close()
+                self._mic_current_bpm_line.remove()
+                if hasattr(self, '_mic_current_bpm_text'):
+                    self._mic_current_bpm_text.remove()
             except:
                 pass
-            self.mic_stream = None
         
-        # Save complete microphone BPM time series data for comparison
-        if hasattr(self, 'mic_time_bpm_pairs') and self.mic_time_bpm_pairs:
-            # Store a copy of the complete BPM time series data
-            self.recorded_mic_bpm_data = self.mic_time_bpm_pairs.copy()
-            print(f"Saved {len(self.recorded_mic_bpm_data)} BPM data points for analysis")
-        else:
-            self.recorded_mic_bpm_data = []
+        # Draw vertical line at current position
+        self._mic_current_bpm_line = self.ax_mic.axvline(x=current_time, color='red', linestyle='--', alpha=0.7)
         
-        # Perform final BPM analysis using the entire recorded buffer
-        if hasattr(self, 'mic_buffer') and self.mic_buffer and len(self.mic_buffer) > 0:
-            # Run final analysis in UI thread
-            self.root.after(0, self._perform_final_mic_analysis)
-    
-    def _mic_monitor_thread(self):
-        """
-        Thread function for microphone monitoring
-        """
-        try:
-            # Define callback function for audio stream
-            def audio_callback(indata, frames, time_info, status):
-                if status:
-                    print(f"Mic status: {status}")
-                
-                # Add data to buffer
-                self.mic_buffer.extend(indata.flatten())
-
-                # Write to WAV in real-time
-                if getattr(self, 'mic_wave_writer', None) is not None:
-                    try:
-                        # Convert float32 [-1,1] to int16
-                        samples = np.clip(indata.flatten(), -1.0, 1.0)
-                        pcm16 = (samples * 32767.0).astype(np.int16).tobytes()
-                        if getattr(self, 'mic_writer_lock', None) is not None:
-                            with self.mic_writer_lock:
-                                self.mic_wave_writer.writeframes(pcm16)
-                        else:
-                            self.mic_wave_writer.writeframes(pcm16)
-                    except Exception as e:
-                        print(f"Error writing mic frames: {e}")
-                
-                # Keep buffer to last 10 seconds
-                max_buffer_size = self.mic_sample_rate * 10
-                if len(self.mic_buffer) > max_buffer_size:
-                    self.mic_buffer = self.mic_buffer[-max_buffer_size:]
-            
-            # Create audio stream
-            self.mic_stream = sd.InputStream(
-                callback=audio_callback,
-                channels=1,
-                samplerate=self.mic_sample_rate,
-                blocksize=self.mic_chunk_size
-            )
-            
-            # Start stream
-            self.mic_stream.start()
-            
-            # Process buffer periodically
-            while self.mic_recording:
-                # Prefer quick initial analysis with ~2s buffer, then switch to stable analysis (~7s)
-                if len(self.mic_buffer) >= self.mic_sample_rate * 7:
-                    # Take a longer window (7 seconds) for more accurate BPM detection
-                    analysis_buffer = self.mic_buffer[-self.mic_sample_rate*7:].copy()
-                    
-                    # Normalize data with better handling of low volume
-                    max_val = np.max(np.abs(analysis_buffer))
-                    if max_val > 0:
-                        analysis_buffer = analysis_buffer / max_val
-                    
-                    # Perform multiple analyses on overlapping segments for stability
-                    segment_duration = 5  # seconds
-                    segment_samples = int(segment_duration * self.mic_sample_rate)
-                    overlap_samples = int(segment_samples * 0.5)  # 50% overlap
-                    
-                    segment_bpms = []
-                    # Analyze 3 overlapping segments
-                    for i in range(3):
-                        start_idx = max(0, len(analysis_buffer) - segment_samples - i * overlap_samples)
-                        end_idx = start_idx + segment_samples
-                        segment = analysis_buffer[start_idx:end_idx]
-                        segment_bpm = self.analyzer.analyze_audio_data(segment, self.mic_sample_rate)
-                        if segment_bpm > 0:  # Only include valid BPM values
-                            segment_bpms.append(segment_bpm)
-                    
-                    # Calculate consensus BPM from segments
-                    if segment_bpms:
-                        # Use median as initial estimate
-                        current_bpm = np.median(segment_bpms)
-                        
-                        # Add to history with confidence weighting
-                        self.mic_bpm_history.append(current_bpm)
-                        
-                        # Keep more history for better smoothing (20 values instead of 10)
-                        history_size = 20
-                        if len(self.mic_bpm_history) > history_size:
-                            self.mic_bpm_history = self.mic_bpm_history[-history_size:]
-                        
-                        # Apply more sophisticated smoothing:
-                        # 1. Use median filter to remove outliers
-                        # 2. Apply exponential moving average for responsiveness
-                        if len(self.mic_bpm_history) >= 3:
-                            # Median filter (3-point)
-                            median_filtered = []
-                            for i in range(len(self.mic_bpm_history)):
-                                if i == 0 or i == len(self.mic_bpm_history) - 1:
-                                    median_filtered.append(self.mic_bpm_history[i])
-                                else:
-                                    window = self.mic_bpm_history[i-1:i+2]
-                                    median_filtered.append(np.median(window))
-                            
-                            # Exponential moving average (alpha=0.3 for more weight to recent values)
-                            alpha = 0.3
-                            ema_bpm = median_filtered[0]
-                            for bpm in median_filtered[1:]:
-                                ema_bpm = alpha * bpm + (1 - alpha) * ema_bpm
-                            
-                            self.mic_bpm = ema_bpm
-                        else:
-                            self.mic_bpm = np.median(self.mic_bpm_history)
-                    else:
-                        # If no valid segments, keep last BPM if available
-                        if not hasattr(self, 'mic_bpm') or self.mic_bpm == 0:
-                            self.mic_bpm = 0
-                    
-                    # Update UI
-                    self.root.after(0, lambda: (self.mic_bpm_label.config(text=f"{self.mic_bpm:.1f}") if hasattr(self, 'mic_bpm_label') else None))
-                    # Removed real-time comparison - will be done after mic stops
-                    
-                    # Update microphone BPM chart at the configured interval
-                    now_ts = time.time()
-                    last_ts = getattr(self, 'mic_last_bpm_sample_ts', self.mic_start_time)
-                    interval = getattr(self, 'mic_bpm_sample_interval', 3.0)
-                    if now_ts - last_ts >= interval:
-                        current_time = now_ts - self.mic_start_time
-                        self.mic_time_bpm_pairs.append((current_time, self.mic_bpm))
-                        # Update the chart in the UI thread
-                        self.root.after(0, self._update_mic_bpm_chart)
-                        self.mic_last_bpm_sample_ts = now_ts
-                elif len(self.mic_buffer) >= int(self.mic_sample_rate * 2):
-                    # Quick initial BPM estimation on ~2 seconds for immediate plotting
-                    analysis_buffer = self.mic_buffer[-int(self.mic_sample_rate*2):].copy()
-                    max_val = np.max(np.abs(analysis_buffer))
-                    if max_val > 0:
-                        analysis_buffer = analysis_buffer / max_val
-                    quick_bpm = self.analyzer.analyze_audio_data(analysis_buffer, self.mic_sample_rate)
-                    if quick_bpm > 0:
-                        self.mic_bpm = quick_bpm
-                        self.root.after(0, lambda: (self.mic_bpm_label.config(text=f"{self.mic_bpm:.1f}") if hasattr(self, 'mic_bpm_label') else None))
-                        now_ts = time.time()
-                        last_ts = getattr(self, 'mic_last_bpm_sample_ts', self.mic_start_time)
-                        interval = getattr(self, 'mic_bpm_sample_interval', 3.0)
-                        if now_ts - last_ts >= interval:
-                            current_time = now_ts - self.mic_start_time
-                            self.mic_time_bpm_pairs.append((current_time, self.mic_bpm))
-                            self.root.after(0, self._update_mic_bpm_chart)
-                            self.mic_last_bpm_sample_ts = now_ts
-                
-                # Sleep for a short time
-                time.sleep(0.5)
-                
-        except Exception as e:
-            print(f"Error in mic monitor thread: {e}")
-            self.root.after(0, lambda: messagebox.showerror("Error", f"Microphone monitoring error:\n{str(e)}"))
-        finally:
-            self._stop_mic_monitoring()
+        # Display current BPM value
+        y_min, y_max = self.ax_mic.get_ylim()
+        y_pos = y_min + (y_max - y_min) * 0.9  # Position near top of chart
+        self._mic_current_bpm_text = self.ax_mic.text(current_time, y_pos, f"Current BPM: {current_bpm:.1f}", 
+                                                   color='red', fontsize=10, ha='center', va='top',
+                                                   bbox=dict(facecolor='white', alpha=0.8, edgecolor='none', pad=2))
+        
+        # Redraw canvas
+        self.canvas_mic.draw()
     
     def compare_bpm(self):
         """
-        Compare microphone recorded BPM with reference BPM and show detailed analysis
+        Compare BPM with reference value using original design with tabs
         """
-        # Check if we have reference BPM
-        if not hasattr(self, 'reference_bpm') or self.reference_bpm == 0:
-            messagebox.showwarning("Warning", "Please analyze an audio file first to get reference BPM")
+        if not hasattr(self, 'time_bpm_pairs') or not self.time_bpm_pairs:
+            QMessageBox.information(self, "Information", "No reference BPM data available. Please analyze an audio file first.")
             return
         
-        # Check if we have recorded microphone BPM data
-        if not hasattr(self, 'recorded_mic_bpm_data') or not self.recorded_mic_bpm_data:
-            # If no recorded data, start microphone monitoring
-            if not self.mic_recording:
-                messagebox.showinfo("Microphone Monitoring", "Start microphone and perform your test. The comparison will be performed when you stop the microphone.")
-                self.comparison_active = True
-                self._start_mic_monitoring()
-            else:
-                messagebox.showinfo("Info", "Microphone is already running. The comparison will be performed when you stop the microphone.")
-        else:
-            # If we have recorded data, perform detailed comparison immediately
-            self._perform_detailed_bpm_comparison()
-    
-    def _perform_final_mic_analysis(self):
-        """
-        Perform final BPM analysis on the entire recorded buffer using accurate algorithms
-        and update comparison results
-        """
-        try:
-            # Get the entire recorded buffer
-            full_buffer = np.array(self.mic_buffer)
-            
-            # Check if buffer is empty
-            if len(full_buffer) == 0:
-                self.final_mic_bpm = 0
-                self.root.after(0, lambda: (self.mic_bpm_label.config(text="Empty recording") if hasattr(self, 'mic_bpm_label') else None))
-                if self.comparison_active:
-                    messagebox.showinfo("Analysis Result", "No audio data recorded. Please try again.")
-                self.mic_buffer = []
-                return
-            
-            # Use the same optimized analysis approach but on the full buffer
-            # 1. Split into overlapping segments for stability
-            segment_duration = 5  # seconds
-            segment_samples = int(segment_duration * self.mic_sample_rate)
-            overlap_samples = int(segment_samples * 0.5)  # 50% overlap
-            
-            segment_bpms = []
-            
-            # Calculate how many segments we can get from the full buffer
-            if len(full_buffer) >= segment_samples:
-                num_segments = max(1, int((len(full_buffer) - segment_samples) / overlap_samples) + 1)
-                num_segments = min(num_segments, 5)  # Limit to 5 segments maximum
-            else:
-                num_segments = 0  # Not enough data for segments
-            
-            # Analyze multiple overlapping segments
-            for i in range(num_segments):
-                start_idx = min(i * overlap_samples, len(full_buffer) - segment_samples)
-                end_idx = start_idx + segment_samples
-                segment = full_buffer[start_idx:end_idx]
-                
-                # Use the same analyzer as before for consistency
-                segment_bpm = self.analyzer.analyze_audio_data(segment, self.mic_sample_rate)
-                if segment_bpm > 0:  # Only include valid BPM values
-                    segment_bpms.append(segment_bpm)
-            
-            # If no segments (buffer too small), analyze the whole buffer at once
-            if not segment_bpms and len(full_buffer) > 0:
-                final_bpm = self.analyzer.analyze_audio_data(full_buffer, self.mic_sample_rate)
-                if final_bpm > 0:
-                    segment_bpms.append(final_bpm)
-            
-            # Calculate consensus BPM from all valid segments
-            if segment_bpms:
-                # Apply 3-point median filter to remove outliers if we have enough segments
-                if len(segment_bpms) >= 3:
-                    # Sort to easily apply median filtering concept
-                    sorted_bpms = sorted(segment_bpms)
-                    # Take middle values (remove min and max if we have more than 3)
-                    if len(sorted_bpms) > 3:
-                        valid_bpms = sorted_bpms[1:-1]
-                    else:
-                        valid_bpms = sorted_bpms
-                    
-                    # Use median of the filtered values as final BPM
-                    self.final_mic_bpm = np.median(valid_bpms)
+        if not hasattr(self, 'mic_time_bpm_pairs') or not self.mic_time_bpm_pairs:
+            QMessageBox.information(self, "Information", "No microphone BPM data available. Please record some audio first.")
+            return
+        
+        # Import necessary modules for the dialog
+        from PySide6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget, QLabel, QPushButton
+        
+        # Create a new dialog for detailed comparison
+        dialog = QDialog(self)
+        dialog.setWindowTitle("BPM Comparison Analysis Report")
+        # Set dialog size to match Advanced BPMAnalyzer main window
+        dialog.setGeometry(100, 100, 900, 800)
+        # Set fixed size to ensure dimensions are respected
+        dialog.setFixedSize(900, 800)
+        dialog.setStyleSheet("background-color: white;")
+        
+        # Main layout
+        main_layout = QVBoxLayout(dialog)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Calculate average BPM for both
+        ref_avg = np.mean([bpm for _, bpm in self.time_bpm_pairs])
+        mic_avg = np.mean([bpm for _, bpm in self.mic_time_bpm_pairs])
+        
+        # Calculate difference
+        difference = mic_avg - ref_avg
+        percentage_diff = (difference / ref_avg) * 100 if ref_avg > 0 else 0
+        
+        # Calculate advanced metrics
+        # Align data by time
+        from scipy.interpolate import interp1d
+        ref_times, ref_bpms = zip(*self.time_bpm_pairs)
+        mic_times, mic_bpms = zip(*self.mic_time_bpm_pairs)
+        
+        # Create interpolation function for reference BPM
+        ref_interp = interp1d(ref_times, ref_bpms, kind='linear', fill_value='extrapolate')
+        
+        # Interpolate reference BPM at microphone time points
+        ref_bpms_interp = ref_interp(mic_times)
+        
+        # Calculate differences
+        differences = np.array(mic_bpms) - np.array(ref_bpms_interp)
+        
+        # Calculate rhythm stability (standard deviation of differences)
+        rhythm_stability = np.std(differences)
+        
+        # Calculate timing consistency
+        within_5_percent = len([d for d in differences if abs(d/ref_avg * 100) <= 5]) / len(differences) * 100
+        within_10_percent = len([d for d in differences if abs(d/ref_avg * 100) <= 10]) / len(differences) * 100
+        within_15_percent = len([d for d in differences if abs(d/ref_avg * 100) <= 15]) / len(differences) * 100
+        
+        # Evaluate performance
+        speed_accuracy = "Excellent" if abs(percentage_diff) <= 2 else "Good" if abs(percentage_diff) <= 5 else "Poor"
+        rhythm_stability_eval = "Excellent" if rhythm_stability <= 2 else "Good" if rhythm_stability <= 5 else "Poor"
+        timing_consistency_eval = "Excellent" if within_10_percent >= 90 else "Good" if within_10_percent >= 70 else "Poor"
+        expression_style_eval = "Excellent" if abs(percentage_diff) <= 5 and rhythm_stability <= 3 else "Good" if abs(percentage_diff) <= 10 else "Poor"
+        
+        # Create tab widget (only once)
+        tab_widget = QTabWidget()
+        main_layout.addWidget(tab_widget)
+        
+        # --- Summary & Metrics Tab --- #
+        summary_tab = QWidget()
+        summary_layout = QVBoxLayout(summary_tab)
+        summary_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Top-right Export button - keep this at the top
+        export_layout = QHBoxLayout()
+        export_layout.setContentsMargins(0, 0, 0, 15)
+        export_layout.addStretch()
+        
+        # Export button
+        export_button = QPushButton("Export")
+        export_button.setFixedSize(120, 35)
+        export_button.setToolTip("Export Summary Metrics and Visual Comparison to PDF")
+        export_button.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 8px;
+                font-size: 14px;
+                color: #1d1d1f;
+                padding: 0 20px;
+            }
+            QPushButton:hover {
+                background-color: #c7c7cc;
+            }
+            QPushButton:pressed {
+                background-color: #b8b8bd;
+            }
+        """)
+        export_layout.addWidget(export_button)
+        
+        # Add Export button layout to summary layout
+        summary_layout.addLayout(export_layout)
+        
+        # Control bar for model dropdown and Generate button - to be moved to AI Feedback area
+        ai_control_bar = QHBoxLayout()
+        ai_control_bar.setContentsMargins(0, 0, 0, 15)
+        ai_control_bar.addStretch()
+        
+        # Model selection dropdown - matches Generate button background
+        model_dropdown = QComboBox()
+        model_dropdown.setFixedSize(180, 35)
+        model_dropdown.addItem("deepseek-v3")
+        model_dropdown.addItem("deepseek-r1")
+        model_dropdown.setStyleSheet("""
+            QComboBox {
+                background-color: #d2d2d7;
+                border: 1px solid #d2d2d7;
+                border-radius: 8px;
+                font-size: 14px;
+                padding: 0 15px;
+                color: #1d1d1f;
+            }
+            QComboBox:hover {
+                background-color: #c7c7cc;
+                border-color: #c7c7cc;
+            }
+            QComboBox:focus {
+                border-color: #007aff;
+                outline: none;
+            }
+            QComboBox::down-arrow {
+                image: none;
+            }
+            QComboBox::drop-down {
+                width: 25px;
+                border-left: 1px solid #b8b8bd;
+                border-top-right-radius: 8px;
+                border-bottom-right-radius: 8px;
+                background-color: rgba(255, 255, 255, 0.2);
+            }
+            QComboBox::drop-down:hover {
+                background-color: rgba(255, 255, 255, 0.3);
+            }
+        """)
+        ai_control_bar.addWidget(model_dropdown)
+        
+        # Add spacing between dropdown and button
+        ai_control_bar.addSpacing(15)
+        
+        # Generate button
+        generate_button = QPushButton("Generate")
+        generate_button.setFixedSize(120, 35)
+        generate_button.setToolTip("Generate AI summary using DeepSeek")
+        generate_button.setStyleSheet("""
+            QPushButton {
+                background-color: #d2d2d7;
+                border: none;
+                border-radius: 8px;
+                font-size: 14px;
+                color: #1d1d1f;
+                padding: 0 20px;
+            }
+            QPushButton:hover {
+                background-color: #c7c7cc;
+            }
+            QPushButton:pressed {
+                background-color: #b8b8bd;
+            }
+        """)
+        ai_control_bar.addWidget(generate_button)
+        
+        # Create a summary text widget to display DeepSeek feedback
+        from PySide6.QtWidgets import QTextEdit, QSplitter, QScrollArea
+        
+        # Create top section for current content
+        top_summary_widget = QWidget()
+        top_summary_layout = QVBoxLayout(top_summary_widget)
+        
+        # Title
+        title_label = QLabel("BPM COMPARISON ANALYSIS REPORT")
+        title_label.setStyleSheet("font-size: 16px; font-weight: bold; margin-bottom: 20px;")
+        top_summary_layout.addWidget(title_label)
+        
+        # Create bottom section for AI feedback
+        feedback_widget = QWidget()
+        feedback_layout = QVBoxLayout(feedback_widget)
+        
+        feedback_title = QLabel("AI Feedback (DeepSeek)")
+        feedback_title.setStyleSheet("font-size: 14px; font-weight: bold; margin-bottom: 10px;")
+        feedback_layout.addWidget(feedback_title)
+        
+        self.feedback_text = QTextEdit()
+        self.feedback_text.setReadOnly(True)
+        self.feedback_text.setMinimumHeight(300)  # Set minimum height
+        self.feedback_text.setStyleSheet("font-size: 13px; background-color: #f5f5f7;")
+        self.feedback_text.setAcceptRichText(True)  # Enable HTML rendering
+        feedback_layout.addWidget(self.feedback_text)
+        
+        # Create scroll area for top summary content to ensure it's fully visible
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(top_summary_widget)
+        
+        # Create a container for AI feedback and controls
+        ai_container = QWidget()
+        ai_layout = QVBoxLayout(ai_container)
+        
+        # Create horizontal layout to align feedback title with controls
+        title_control_layout = QHBoxLayout()
+        title_control_layout.setContentsMargins(0, 0, 0, 10)
+        
+        # Add feedback title on the left
+        title_control_layout.addWidget(feedback_title)
+        
+        # Add stretch to push controls to the right
+        title_control_layout.addStretch()
+        
+        # Add DeepSeek controls on the right, aligned with the title
+        title_control_layout.addLayout(ai_control_bar)
+        
+        # Remove margins from ai_control_bar to avoid extra spacing
+        ai_control_bar.setContentsMargins(0, 0, 0, 0)
+        
+        # Add the combined title+controls layout
+        ai_layout.addLayout(title_control_layout)
+        
+        # Add AI feedback text edit
+        ai_layout.addWidget(self.feedback_text)
+        
+        # Create splitter to divide the summary into two sections
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(scroll_area)
+        splitter.addWidget(ai_container)
+        
+        # Set initial sizes for splitter sections
+        splitter.setSizes([400, 400])
+        
+        # Add splitter to summary layout
+        summary_layout.addWidget(splitter)
+        
+        # Implement the _generate_deepseek_summary function
+        def _generate_deepseek_summary():
+            """
+            Call DeepSeek chat API using current comparison data and append the
+            returned feedback to the Summary & Metrics tab. Runs in a background thread.
+            """
+            def build_prompt():
+                # Prefer recorded microphone series if available
+                if hasattr(self, 'recorded_mic_bpm_data') and self.recorded_mic_bpm_data:
+                    pairs = self.recorded_mic_bpm_data
                 else:
-                    # For fewer segments, use median or average
-                    self.final_mic_bpm = np.median(segment_bpms)
-                
-                # Show final BPM in UI
-                self.root.after(0, lambda: (self.mic_bpm_label.config(text=f"Final: {self.final_mic_bpm:.1f}") if hasattr(self, 'mic_bpm_label') else None))
-                
-                # If comparison is active, update the comparison results
-                if self.comparison_active and hasattr(self, 'reference_bpm') and self.reference_bpm > 0:
-                    self._update_bpm_comparison()
-            else:
-                # No valid BPM detected
-                self.final_mic_bpm = 0
-                self.root.after(0, lambda: (self.mic_bpm_label.config(text="No BPM detected") if hasattr(self, 'mic_bpm_label') else None))
-                
-                if self.comparison_active:
-                    messagebox.showinfo("Analysis Result", "Could not detect BPM from the recording. Please try again with clearer audio.")
+                    pairs = self.mic_time_bpm_pairs
+                max_items = 60
+                pairs_str = ", ".join([f"{round(t,1)}s:{round(b,1)}" for t, b in pairs[:max_items]]) if pairs else "(no data)"
+                instruction = (
+                    f"Reference BPM (Score): {ref_avg:.1f}\n"
+                    f"Recorded BPM time-series (time:value, up to {max_items} items): {pairs_str}\n"
+                    f"Recorded BPM stats — mean: {mic_avg:.1f}, difference vs reference: {difference:.1f} ({percentage_diff:.1f}%).\n"
+                    "Please compare the recorded BPM against the reference BPM, provide an evaluation of the performance, and suggest improvements.\n"
+                    "Respond in English, concise and structured with these sections: Overall Evaluation, Issues Observed, Actionable Improvement Suggestions."
+                )
+                return instruction
+            
+            def request_thread():
+                try:
+                    instruction = build_prompt()
                     
-        except Exception as e:
-            print(f"Error in final BPM analysis: {e}")
-            self.final_mic_bpm = 0
-            self.root.after(0, lambda: (self.mic_bpm_label.config(text="Analysis Error") if hasattr(self, 'mic_bpm_label') else None))
-        
-        # Clear the buffer for next recording
-        self.mic_buffer = []
-
-    def _update_mic_bpm_chart(self):
-        """
-        Update the real-time microphone BPM chart
-        """
-        try:
-            # Clear previous plot
-            self.ax_mic.clear()
-            
-            # Initialize if not exists
-            if not hasattr(self, 'mic_time_bpm_pairs'):
-                self.mic_time_bpm_pairs = []
-            
-            # Always initialize times and bpms to avoid undefined variable errors
-            times = []
-            bpms = []
-            
-            # Extract data - ensure times and bpms have the same length
-            times = []
-            bpms = []
-            if self.mic_time_bpm_pairs:
-                # Process pairs together to ensure times and bpms stay in sync
-                for pair in self.mic_time_bpm_pairs:
-                    # Skip invalid pairs
-                    if len(pair) < 2:
-                        continue
+                    # Try multiple environment variable names
+                    api_key = None
+                    possible_env_names = ['DEEPSEEK_API_KEY', 'deepseek_api_key', 'DEEPSEEK-API-KEY', 'deepseek-api-key']
                     
-                    # Check if time is valid
-                    if isinstance(pair[0], (int, float)) and not np.isnan(pair[0]):
-                        # For BPM, accept 0 only for the initial point
-                        if isinstance(pair[1], (int, float)) and not np.isnan(pair[1]) and (pair[1] > 0 or (len(times) == 0 and pair[0] == 0 and pair[1] == 0)):
-                            times.append(pair[0])
-                            bpms.append(pair[1])
-            
-            # If we have valid data points
-            if times and bpms and len(times) == len(bpms):
-                # Plot BPM curve with solid line - only if we have more than one point or the point is not the initial (0,0)
-                if len(bpms) > 1 or (len(bpms) == 1 and bpms[0] > 0):
-                    self.ax_mic.plot(times, bpms, 'b-', linewidth=2.5, alpha=0.8, label='Microphone BPM')
+                    for env_name in possible_env_names:
+                        temp_key = os.environ.get(env_name)
+                        print(f"Debug: Checking env var '{env_name}': {'Found' if temp_key else 'Not found'}")
+                        if temp_key:
+                            api_key = temp_key
+                            print(f"Debug: Using API key from env var: '{env_name}'")
+                            break
                     
-                    # Plot BPM points
-                    self.ax_mic.scatter(times, bpms, color='r', s=40, alpha=0.7, label='BPM Samples')
+                    # Fallback to project config.json with multiple possible keys
+                    if not api_key:
+                        try:
+                            cfg_path = os.path.join(os.path.dirname(__file__), "config.json")
+                            print(f"Debug: Checking config.json at: {cfg_path}")
+                            if os.path.exists(cfg_path):
+                                with open(cfg_path, "r", encoding="utf-8") as f:
+                                    cfg = json.load(f)
+                                
+                                possible_config_keys = ['DEEPSEEK_API_KEY', 'deepseek_api_key', 'api_key', 'api-key', 'DEEPSEEK-API-KEY', 'deepseek-api-key']
+                                for config_key in possible_config_keys:
+                                    temp_key = cfg.get(config_key)
+                                    print(f"Debug: Checking config key '{config_key}': {'Found' if temp_key else 'Not found'}")
+                                    if temp_key:
+                                        api_key = temp_key
+                                        print(f"Debug: Using API key from config: '{config_key}'")
+                                        break
+                                
+                                if not api_key:
+                                    print(f"Debug: No API key found in config.json. Available keys: {list(cfg.keys())}")
+                            else:
+                                print(f"Debug: config.json not found at: {cfg_path}")
+                        except Exception as e:
+                            print(f"Debug: Error reading config.json: {str(e)}")
+                            api_key = None
                     
-                    # Add average BPM line if we have enough data (and exclude initial 0 value)
-                    valid_bpms = [bpm for bpm in bpms if bpm > 0]
-                    if len(valid_bpms) > 1:
-                        avg_bpm = np.mean(valid_bpms)
-                        self.ax_mic.axhline(y=avg_bpm, color='g', linestyle='--', alpha=0.7, 
-                                          label=f'Current Avg: {avg_bpm:.1f}')
+                    # Try another approach: check current directory
+                    if not api_key:
+                        try:
+                            cfg_path = "config.json"
+                            print(f"Debug: Checking config.json in current dir: {cfg_path}")
+                            if os.path.exists(cfg_path):
+                                with open(cfg_path, "r", encoding="utf-8") as f:
+                                    cfg = json.load(f)
+                                
+                                possible_config_keys = ['DEEPSEEK_API_KEY', 'deepseek_api_key', 'api_key', 'api-key', 'DEEPSEEK-API-KEY', 'deepseek-api-key']
+                                for config_key in possible_config_keys:
+                                    temp_key = cfg.get(config_key)
+                                    print(f"Debug: Checking current dir config key '{config_key}': {'Found' if temp_key else 'Not found'}")
+                                    if temp_key:
+                                        api_key = temp_key
+                                        print(f"Debug: Using API key from current dir config: '{config_key}'")
+                                        break
+                        except Exception as e:
+                            print(f"Debug: Error reading current dir config.json: {str(e)}")
+                            api_key = None
                     
-                    # Set appropriate y-axis limits - use only valid BPM values > 0
-                    if valid_bpms:
-                        min_bpm = max(40, min(valid_bpms) - 10)
-                        max_bpm = min(220, max(valid_bpms) + 10)
-                        self.ax_mic.set_ylim(min_bpm, max_bpm)
-                
-                # Set x-axis limits to keep start point at the left but dynamically expand right side
-                max_time = max(times)
-                if max_time < 5:  # Initial window when just starting
-                    self.ax_mic.set_xlim(0, 5)
-                else:
-                    # Always keep start at 0, expand right side as time increases
-                    self.ax_mic.set_xlim(0, max_time + 2)
-            
-            # Always configure the basic plot elements
-            self.ax_mic.set_title("Real-time Microphone BPM", pad=10)
-            self.ax_mic.set_xlabel("Time (seconds)")
-            self.ax_mic.set_ylabel("BPM")
-            
-            # Set default y-limits if no valid data
-            if not self.mic_time_bpm_pairs or (len(times) == 1 and times[0] == 0 and bpms[0] == 0):
-                self.ax_mic.set_ylim(40, 220)
-                self.ax_mic.set_xlim(0, 5)
-                # Change text to indicate microphone is active but gathering initial data
-                self.ax_mic.text(0.5, 0.5, "Microphone active. Analyzing initial audio...",
-                                ha='center', va='center', transform=self.ax_mic.transAxes,
-                                color='gray', style='italic')
-            elif not times or not bpms:
-                self.ax_mic.set_ylim(40, 220)
-                self.ax_mic.set_xlim(0, 5)
-            
-            # Add grid
-            self.ax_mic.grid(True, alpha=0.3)
-            
-            # Only add legend if we have valid data to display
-            if times and bpms and len(bpms) > 1 or (len(bpms) == 1 and bpms[0] > 0):
-                # Check if there are any elements with labels to show in the legend
-                if any(line.get_label() not in ("_nolegend_", "") for line in self.ax_mic.get_lines()):
-                    self.ax_mic.legend(loc='upper right')
-            
-            # Ensure title and x-label are not clipped
-            try:
-                self.fig_mic.subplots_adjust(top=0.86, bottom=0.22)
-            except Exception:
-                pass
-            # Redraw canvas
-            self.fig_mic.tight_layout(rect=[0, 0.12, 1, 0.92])
-            self.canvas_mic.draw()
-            
-        except Exception as e:
-            print(f"Error updating microphone BPM chart: {e}")
-    
-    def _update_bpm_comparison(self):
-        """
-        Update BPM comparison results
-        """
-        if not self.comparison_active or not hasattr(self, 'reference_bpm') or self.reference_bpm == 0 or not hasattr(self, 'final_mic_bpm') or self.final_mic_bpm == 0:
-            return
-            
-        # Use final_mic_bpm for comparison instead of mic_bpm
-        mic_bpm = self.final_mic_bpm
-            
-        # Calculate BPM difference and percentage
-        bpm_diff = abs(self.reference_bpm - mic_bpm)
-        bpm_percent_diff = (bpm_diff / self.reference_bpm) * 100
-        
-        # Determine similarity level
-        if bpm_percent_diff < 2:
-            similarity = "Perfect Match"
-            color = "green"
-            feedback = "Excellent timing! You're perfectly in sync."
-        elif bpm_percent_diff < 5:
-            similarity = "Very Good Match"
-            color = "#4CAF50"  # Darker green
-            feedback = "Great job! Your timing is very close."
-        elif bpm_percent_diff < 10:
-            similarity = "Good Match"
-            color = "#8BC34A"  # Light green
-            feedback = "Good timing. Slight adjustments could make it perfect."
-        elif bpm_percent_diff < 15:
-            similarity = "Fair Match"
-            color = "#FFC107"  # Yellow
-            feedback = "Decent timing. Try to [speed up/slow down] to match better."
-            if mic_bpm < self.reference_bpm:
-                feedback = feedback.replace("[speed up/slow down]", "speed up")
-            else:
-                feedback = feedback.replace("[speed up/slow down]", "slow down")
-        else:
-            similarity = "Not Well Matched"
-            color = "#F44336"  # Red
-            feedback = "Significant timing difference. Try to [speed up/slow down] considerably."
-            if self.mic_bpm < self.reference_bpm:
-                feedback = feedback.replace("[speed up/slow down]", "speed up")
-            else:
-                feedback = feedback.replace("[speed up/slow down]", "slow down")
-        
-        # Update comparison label
-        comparison_text = f"{similarity} ({bpm_diff:.1f} BPM difference)"
-        if hasattr(self, 'comparison_label'):
-            self.comparison_label.config(text=comparison_text, foreground=color)
-        
-        # Store comparison result
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.comparison_results.append((timestamp, self.reference_bpm, self.mic_bpm, bpm_diff, similarity))
-        
-        # Keep only last 50 results
-        if len(self.comparison_results) > 50:
-            self.comparison_results = self.comparison_results[-50:]
-            
-        # If we have recorded mic BPM data, show detailed analysis
-        if hasattr(self, 'recorded_mic_bpm_data') and self.recorded_mic_bpm_data:
-            self._perform_detailed_bpm_comparison()
-            
-    def _perform_detailed_bpm_comparison(self):
-        """
-        Perform detailed BPM comparison analysis from multiple perspectives
-        and show comprehensive evaluation report
-        """
-        # Calculate metrics starting from current seek positions of both progress bars
-        start_ref = float(self.seek_var_ref.get()) if hasattr(self, 'seek_var_ref') else 0.0
-        start_mic = float(self.seek_var_mic.get()) if hasattr(self, 'seek_var_mic') else 0.0
-        
-        # Slice mic BPM data from its seek position onward
-        mic_pairs = self.recorded_mic_bpm_data or []
-        mic_pairs = [(t, b) for (t, b) in mic_pairs if t >= start_mic]
-        mic_bpms = [bpm for _, bpm in mic_pairs if bpm > 0]
-        if not mic_bpms:
-            messagebox.showinfo("Comparison Result", "No valid microphone BPM data found from the current mic position onward.")
-            return
-        
-        # Slice reference BPM data from its seek position onward and compute segment average
-        ref_pairs = getattr(self, 'time_bpm_pairs', []) or []
-        ref_pairs = [(t, b) for (t, b) in ref_pairs if t >= start_ref]
-        ref_bpms = [bpm for _, bpm in ref_pairs if bpm > 0]
-        ref_bpm_for_compare = (np.mean(ref_bpms) if ref_bpms else float(getattr(self, 'reference_bpm', 0.0))) or 0.0
-        if ref_bpm_for_compare <= 0:
-            messagebox.showinfo("Comparison Result", "No valid reference BPM data found from the current reference position onward.")
-            return
-        
-        # Speed analysis
-        avg_mic_bpm = np.mean(mic_bpms)
-        median_mic_bpm = np.median(mic_bpms)
-        bpm_diff = abs(avg_mic_bpm - ref_bpm_for_compare)
-        bpm_percent_diff = (bpm_diff / ref_bpm_for_compare) * 100 if ref_bpm_for_compare > 0 else 0
-        
-        # Rhythm stability analysis (standard deviation)
-        bpm_std = np.std(mic_bpms)
-        stability_score = 100 - min(100, bpm_std * 10)  # Higher is more stable
-        
-        # Tempo consistency analysis
-        # Check how many BPM readings are within certain percentage of the reference segment BPM
-        within_2_percent = sum(1 for bpm in mic_bpms if abs(bpm - ref_bpm_for_compare) / ref_bpm_for_compare * 100 <= 2)
-        within_5_percent = sum(1 for bpm in mic_bpms if abs(bpm - ref_bpm_for_compare) / ref_bpm_for_compare * 100 <= 5)
-        within_10_percent = sum(1 for bpm in mic_bpms if abs(bpm - ref_bpm_for_compare) / ref_bpm_for_compare * 100 <= 10)
-        
-        consistency_2 = (within_2_percent / len(mic_bpms)) * 100
-        consistency_5 = (within_5_percent / len(mic_bpms)) * 100
-        consistency_10 = (within_10_percent / len(mic_bpms)) * 100
-        
-        # Timing progression analysis (detect speeding up/slowing down trends)
-        # Split mic data into thirds from the current starting point
-        if len(mic_pairs) >= 3:
-            third = len(mic_pairs) // 3
-            first_third_bpms = [bpm for _, bpm in mic_pairs[:third] if bpm > 0]
-            middle_third_bpms = [bpm for _, bpm in mic_pairs[third:2*third] if bpm > 0]
-            last_third_bpms = [bpm for _, bpm in mic_pairs[2*third:] if bpm > 0]
-            
-            first_avg = np.mean(first_third_bpms) if first_third_bpms else 0
-            middle_avg = np.mean(middle_third_bpms) if middle_third_bpms else 0
-            last_avg = np.mean(last_third_bpms) if last_third_bpms else 0
-            
-            # Determine trend
-            if first_avg > 0 and last_avg > 0:
-                trend_diff = last_avg - first_avg
-                trend_percent = (abs(trend_diff) / first_avg) * 100 if first_avg > 0 else 0
-                
-                if trend_diff > 0 and trend_percent > 5:
-                    timing_trend = f"Speeding up (+{trend_percent:.1f}%)"
-                elif trend_diff < 0 and trend_percent > 5:
-                    timing_trend = f"Slowing down (-{trend_percent:.1f}%)"
-                else:
-                    timing_trend = "Consistent"
-            else:
-                timing_trend = "Insufficient data"
-        else:
-            timing_trend = "Insufficient data"
-        
-        # Generate evaluation and feedback
-        evaluation, suggestions = self._generate_evaluation_and_suggestions(
-            bpm_percent_diff, stability_score, consistency_10, timing_trend
-        )
-        
-        # Create and show comparison report window
-        self._show_comparison_report(
-            reference_bpm=ref_bpm_for_compare,
-            avg_mic_bpm=avg_mic_bpm,
-            median_mic_bpm=median_mic_bpm,
-            bpm_diff=bpm_diff,
-            bpm_percent_diff=bpm_percent_diff,
-            stability_score=stability_score,
-            consistency_2=consistency_2,
-            consistency_5=consistency_5,
-            consistency_10=consistency_10,
-            timing_trend=timing_trend,
-            evaluation=evaluation,
-            suggestions=suggestions
-        )
-        
-    def _generate_evaluation_and_suggestions(self, bpm_percent_diff, stability_score, consistency_10, timing_trend):
-        """
-        Generate comprehensive evaluation and improvement suggestions based on comparison metrics
-        """
-        evaluation = []
-        suggestions = []
-        
-        # Speed evaluation
-        if bpm_percent_diff < 3:
-            evaluation.append("✅ **Speed Accuracy**: Excellent - Your performance speed almost perfectly matches the score")
-        elif bpm_percent_diff < 7:
-            evaluation.append("✅ **Speed Accuracy**: Good - Your performance speed is very close to the score")
-        elif bpm_percent_diff < 12:
-            evaluation.append("⚠️ **Speed Accuracy**: Moderate - There is some difference between your performance speed and the score")
-        else:
-            evaluation.append("❌ **Speed Accuracy**: Low - There is a significant difference between your performance speed and the score")
-            if hasattr(self, 'mic_bpm') and self.mic_bpm > self.reference_bpm:
-                suggestions.append("- Try slowing down your playing speed to match the score")
-            else:
-                suggestions.append("- Try speeding up your playing to match the score")
-        
-        # Rhythm stability evaluation
-        if stability_score >= 80:
-            evaluation.append("✅ **Rhythm Stability**: Excellent - Your rhythm is very stable")
-        elif stability_score >= 60:
-            evaluation.append("✅ **Rhythm Stability**: Good - Your rhythm is relatively stable")
-        elif stability_score >= 40:
-            evaluation.append("⚠️ **Rhythm Stability**: Average - Your rhythm has fluctuations")
-        else:
-            evaluation.append("❌ **Rhythm Stability**: Poor - Your rhythm has significant fluctuations")
-            suggestions.append("- Practice with a metronome to improve your sense of rhythm")
-            suggestions.append("- Practice in segments to gradually improve rhythm stability")
-        
-        # Timing consistency evaluation
-        if consistency_10 >= 90:
-            evaluation.append("✅ **Timing Precision**: Excellent - Your performance timing is very accurate")
-        elif consistency_10 >= 70:
-            evaluation.append("✅ **Timing Precision**: Good - Your performance timing is mostly accurate")
-        elif consistency_10 >= 50:
-            evaluation.append("⚠️ **Timing Precision**: Needs improvement - Your performance timing is somewhat unstable")
-        else:
-            evaluation.append("❌ **Timing Precision**: Poor - Your performance timing is unstable")
-            suggestions.append("- Focus on the accuracy of bar lines and beats")
-            suggestions.append("- Practice slowly first, then gradually increase speed to ensure accurate note values")
-        
-        # Tempo trend evaluation
-        if "Consistent" in timing_trend:
-            evaluation.append("✅ **Expression & Style**: Excellent - Your performance maintains stable speed, demonstrating professional musical expression")
-        elif "Speeding up" in timing_trend:
-            evaluation.append("⚠️ **Expression & Style**: Acceleration tendency - Your performance shows a trend of gradually speeding up")
-            suggestions.append("- Pay attention to controlling speed, especially during transitions between sections")
-            suggestions.append("- Practice with a metronome to develop a stable sense of tempo")
-        elif "Slowing down" in timing_trend:
-            evaluation.append("⚠️ **Expression & Style**: Deceleration tendency - Your performance shows a trend of gradually slowing down")
-            suggestions.append("- Focus on maintaining energy and momentum throughout the performance")
-            suggestions.append("- Pay attention to breathing and physical movements to maintain continuity")
-        else:
-            evaluation.append("ℹ️ **Expression & Style**: Insufficient data - Unable to accurately evaluate expression and style")
-        
-        # Overall suggestions based on all metrics
-        if bpm_percent_diff < 5 and stability_score >= 70 and consistency_10 >= 80:
-            suggestions.append("- Keep up the good work! You can try adding more musical expression without affecting rhythm")
-            suggestions.append("- You can start focusing on emotional expression and tone variations")
-        elif bpm_percent_diff >= 15 or stability_score < 50 or consistency_10 < 60:
-            suggestions.append("- It's recommended to start with the basics, practicing with a metronome in stages")
-            suggestions.append("- Master accurate rhythm at slow speeds first, then gradually increase the tempo")
-        
-        return evaluation, suggestions
-        
-    def _show_comparison_report(self, **metrics):
-        """
-        Create and display a detailed BPM comparison report window
-        """
-        # Create new window
-        report_window = tk.Toplevel(self.root)
-        report_window.title("BPM Comparison Analysis Report")
-        report_window.geometry("1125x650")
-        report_window.resizable(True, True)
-        
-        # Create notebook for tabs
-        notebook = ttk.Notebook(report_window)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Tab 1: Summary & Metrics (merged)
-        summary_tab = ttk.Frame(notebook)
-        notebook.add(summary_tab, text="Summary & Metrics")
-        
-        # Top-right control bar (model dropdown + Generate button)
-        control_bar = ttk.Frame(summary_tab)
-        control_bar.pack(fill=tk.X, padx=10, pady=(10, 0))
-        model_var = tk.StringVar(value="deepseek-v3")
-        model_box = ttk.Combobox(control_bar, textvariable=model_var, values=["deepseek-v3", "deepseek-r1"], state="readonly", width=18)
-        model_box.pack(side=tk.RIGHT, padx=(6, 0))
-        generate_btn = ttk.Button(control_bar, text="Generate")
-        generate_btn.pack(side=tk.RIGHT)
-        
-        # Create summary text widget with scrollbar
-        summary_frame = ttk.Frame(summary_tab)
-        summary_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        summary_text = tk.Text(summary_frame, wrap=tk.WORD, font=("Arial", 10))
-        summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        scrollbar = ttk.Scrollbar(summary_frame, command=summary_text.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        summary_text.config(yscrollcommand=scrollbar.set)
-        
-        # Wire Generate to call DeepSeek with current data
-        generate_btn.config(command=lambda: self._generate_deepseek_summary(metrics, model_var.get(), summary_text))
-        
-        # Add summary content
-        summary_text.insert(tk.END, "BPM COMPARISON ANALYSIS REPORT\n\n")
-        
-        summary_text.insert(tk.END, "📊 COMPARISON METRICS:\n\n")
-        summary_text.insert(tk.END, f"Reference BPM (Score): {metrics['reference_bpm']:.1f}\n")
-        summary_text.insert(tk.END, f"Your Average BPM: {metrics['avg_mic_bpm']:.1f}\n")
-        summary_text.insert(tk.END, f"Your Median BPM: {metrics['median_mic_bpm']:.1f}\n")
-        summary_text.insert(tk.END, f"BPM Difference: {metrics['bpm_diff']:.1f} ({metrics['bpm_percent_diff']:.1f}%)\n\n")
-        
-        summary_text.insert(tk.END, "🎯 DETAILED EVALUATION:\n\n")
-        for item in metrics['evaluation']:
-            summary_text.insert(tk.END, f"{item}\n")
-        
-        summary_text.insert(tk.END, "\n💡 IMPROVEMENT SUGGESTIONS:\n\n")
-        for suggestion in metrics['suggestions']:
-            summary_text.insert(tk.END, f"{suggestion}\n")
-        
-        # Make text widget read-only
-        summary_text.config(state=tk.DISABLED)
-        
-        # Append Advanced Metrics to Summary tab
-        summary_text.config(state=tk.NORMAL)
-        summary_text.insert(tk.END, "\n\nADVANCED PERFORMANCE METRICS\n\n")
-        
-        summary_text.insert(tk.END, "📈 RHYTHM STABILITY:\n")
-        summary_text.insert(tk.END, f"Stability Score: {metrics['stability_score']:.1f}/100\n")
-        
-        summary_text.insert(tk.END, "\n🎯 TIMING CONSISTENCY:\n")
-        summary_text.insert(tk.END, f"Within ±2% of reference: {metrics['consistency_2']:.1f}%\n")
-        summary_text.insert(tk.END, f"Within ±5% of reference: {metrics['consistency_5']:.1f}%\n")
-        summary_text.insert(tk.END, f"Within ±10% of reference: {metrics['consistency_10']:.1f}%\n")
-        
-        summary_text.insert(tk.END, "\n⏱️ TEMPO PROGRESSION:\n")
-        summary_text.insert(tk.END, f"Performance Trend: {metrics['timing_trend']}\n")
-        
-        summary_text.insert(tk.END, "\n📊 INTERPRETATION:\n")
-        if metrics['stability_score'] >= 80:
-            summary_text.insert(tk.END, "• Your rhythm is highly stable, showing professional-level control.\n")
-        elif metrics['stability_score'] >= 60:
-            summary_text.insert(tk.END, "• Your rhythm is generally stable with minor fluctuations.\n")
-        else:
-            summary_text.insert(tk.END, "• Your rhythm has noticeable fluctuations that should be addressed.\n")
-        
-        if metrics['consistency_10'] >= 90:
-            summary_text.insert(tk.END, "• You maintained excellent timing throughout the performance.\n")
-        elif metrics['consistency_10'] >= 70:
-            summary_text.insert(tk.END, "• Your timing was mostly consistent with occasional variations.\n")
-        else:
-            summary_text.insert(tk.END, "• Your timing needs more consistency to match the score accurately.\n")
-        
-        summary_text.config(state=tk.DISABLED)
-        
-        # Tab 3: Visual Comparison
-        visual_tab = ttk.Frame(notebook)
-        notebook.add(visual_tab, text="Visual Comparison")
-        
-        # Create figure for visual comparison with distribution subplots below
-        fig = plt.figure(figsize=(12, 8))
-        fig.patch.set_facecolor('#f0f0f0')  # Match Tkinter background
-        gs = fig.add_gridspec(nrows=4, ncols=2, height_ratios=[2, 1, 1, 1])
-        ax_ts = fig.add_subplot(gs[0, :])
-        ax_violin = fig.add_subplot(gs[1, :])
-        ax_box = fig.add_subplot(gs[2, :])
-        ax_heatmap = fig.add_subplot(gs[3, :])
-        # Increase vertical spacing between subplots and remove line between top and middle
-        fig.subplots_adjust(hspace=0.40)
-        try:
-            ax_ts.spines['bottom'].set_visible(False)
-        except Exception:
-            pass
-        
-        # Plot microphone BPM over time (filtered by selected range)
-        selected_start = float(getattr(self, 'ref_range_start', 0.0))
-        selected_end = float(getattr(self, 'ref_range_end', 0.0))
-        mic_pairs = self.recorded_mic_bpm_data or []
-        if selected_end > selected_start:
-            mic_pairs = [(t, b) for (t, b) in mic_pairs if t >= selected_start and t <= selected_end]
-        times = [t for t, _ in mic_pairs]
-        mic_bpms = [b for _, b in mic_pairs]
-        
-        # Filter out zero BPM values
-        valid_times = [t for t, b in zip(times, mic_bpms) if b > 0]
-        valid_bpms = [b for b in mic_bpms if b > 0]
-        
-        if valid_times and valid_bpms:
-            # Top: real-time microphone BPM + reference + mean + faster/slower fill (extracted)
-            sheet_bpm = metrics['reference_bpm']
-            ref_series = plot_bpm_timeseries(
-                ax_ts,
-                valid_times=valid_times,
-                valid_bpms=valid_bpms,
-                sheet_bpm=sheet_bpm,
-                reference_pairs=getattr(self, 'time_bpm_pairs', None)
-            )
-
-            # Distributions: violin and box plots (extracted)
-            plot_distributions(ax_violin, ax_box, valid_bpms, ref_series)
-            
-            # Heatmap: segment-wise tempo deviation (%) — extracted to bpm_visuals module
-            im = plot_deviation_heatmap(
-                ax_heatmap,
-                valid_times=valid_times,
-                valid_bpms=valid_bpms,
-                ref_series=ref_series,
-                sheet_bpm=sheet_bpm,
-                segment_count=8
-            )
-            cbar = fig.colorbar(im, ax=ax_heatmap, pad=0.01)
-            cbar.ax.tick_params(labelsize=6)
-            cbar.set_label('Deviation (%)', fontsize=6)
-            
-            # Adjust layout: leave top margin to avoid title clipping on resize
-            fig.subplots_adjust(top=0.92)
-            
-            # Removed divider line between top time series and lower plots
-            
-            # Embed plot in a vertically scrollable Tkinter container
-            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-            scroll_container = ttk.Frame(visual_tab)
-            scroll_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-            tk_canvas = tk.Canvas(scroll_container, highlightthickness=0)
-            tk_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            vsb = ttk.Scrollbar(scroll_container, orient=tk.VERTICAL, command=tk_canvas.yview)
-            vsb.pack(side=tk.RIGHT, fill=tk.Y)
-            tk_canvas.configure(yscrollcommand=vsb.set)
-            
-            inner = ttk.Frame(tk_canvas)
-            window_id = tk_canvas.create_window((0, 0), window=inner, anchor='nw')
-            
-            fig_canvas = FigureCanvasTkAgg(fig, master=inner)
-            fig_canvas.draw()
-            fig_widget = fig_canvas.get_tk_widget()
-            fig_widget.pack(fill=tk.X, expand=False)
-            
-            def _update_scrollregion(event=None):
-                tk_canvas.configure(scrollregion=tk_canvas.bbox('all'))
-            inner.bind('<Configure>', _update_scrollregion)
-            
-            def _resize_inner(event):
-                tk_canvas.itemconfigure(window_id, width=event.width)
-            tk_canvas.bind('<Configure>', _resize_inner)
-
-            # Enable mouse wheel scrolling
-            def _on_mousewheel(event):
-                delta = event.delta if hasattr(event, 'delta') else 0
-                step = -1 if delta > 0 else (1 if delta < 0 else 0)
-                if step != 0:
-                    tk_canvas.yview_scroll(step, 'units')
-
-            # Bind wheel events to widgets
-            tk_canvas.bind('<MouseWheel>', _on_mousewheel)
-            inner.bind('<MouseWheel>', _on_mousewheel)
-            fig_widget.bind('<MouseWheel>', _on_mousewheel)
-
-            # Linux support for wheel
-            tk_canvas.bind('<Button-4>', lambda e: tk_canvas.yview_scroll(-1, 'units'))
-            tk_canvas.bind('<Button-5>', lambda e: tk_canvas.yview_scroll(1, 'units'))
-            inner.bind('<Button-4>', lambda e: tk_canvas.yview_scroll(-1, 'units'))
-            inner.bind('<Button-5>', lambda e: tk_canvas.yview_scroll(1, 'units'))
-            fig_widget.bind('<Button-4>', lambda e: tk_canvas.yview_scroll(-1, 'units'))
-            fig_widget.bind('<Button-5>', lambda e: tk_canvas.yview_scroll(1, 'units'))
-
-            # Activate wheel capture within scroll area
-            def _activate_wheel(event=None):
-                tk_canvas.bind_all('<MouseWheel>', _on_mousewheel)
-            def _deactivate_wheel(event=None):
-                tk_canvas.unbind_all('<MouseWheel>')
-            scroll_container.bind('<Enter>', _activate_wheel)
-            scroll_container.bind('<Leave>', _deactivate_wheel)
-        else:
-            no_data_label = ttk.Label(visual_tab, text="No valid BPM data available for visualization.")
-            no_data_label.pack(pady=50)
-        
-        # Add close button
-        close_button = ttk.Button(report_window, text="Close", command=report_window.destroy)
-        close_button.pack(pady=10)
-
-    def _generate_deepseek_summary(self, metrics, model_name, summary_text_widget):
-        """
-        Call DeepSeek chat API using current comparison data and append the
-        returned feedback to the Summary & Metrics tab. Runs in a background thread.
-        """
-        def build_prompt():
-            ref_bpm = metrics.get('reference_bpm', 0)
-            # Prefer recorded microphone series
-            if hasattr(self, 'recorded_mic_bpm_data') and self.recorded_mic_bpm_data:
-                pairs = self.recorded_mic_bpm_data
-            else:
-                pairs = getattr(self, 'mic_time_bpm_pairs', [])
-            max_items = 60
-            pairs_str = ", ".join([f"{round(t,1)}s:{round(b,1)}" for t, b in pairs[:max_items]]) if pairs else "(no data)"
-            avg_mic = metrics.get('avg_mic_bpm', 0)
-            median_mic = metrics.get('median_mic_bpm', 0)
-            diff = metrics.get('bpm_diff', 0)
-            percent = metrics.get('bpm_percent_diff', 0)
-            instruction = (
-                f"Reference BPM (Score): {ref_bpm:.1f}\n"
-                f"Recorded BPM time-series (time:value, up to {max_items} items): {pairs_str}\n"
-                f"Recorded BPM stats — mean: {avg_mic:.1f}, median: {median_mic:.1f}, difference vs reference: {diff:.1f} ({percent:.1f}%).\n"
-                "Please compare the recorded BPM against the reference BPM, provide an evaluation of the performance, and suggest improvements.\n"
-                "Respond in English, concise and structured with these sections: Overall Evaluation, Issues Observed, Actionable Improvement Suggestions."
-            )
-            return instruction
-
-        def request_thread():
-            try:
-                instruction = build_prompt()
-                import os, json, urllib.request, urllib.error
-                api_key = os.environ.get('DEEPSEEK_API_KEY')
-                if not api_key:
-                    # Fallback to project config.json
-                    try:
-                        cfg_path = os.path.join(os.path.dirname(__file__), "config.json")
-                        if os.path.exists(cfg_path):
-                            with open(cfg_path, "r", encoding="utf-8") as f:
-                                cfg = json.load(f)
-                            api_key = cfg.get("DEEPSEEK_API_KEY")
-                    except Exception:
+                    # Check if API key is just an empty string
+                    if api_key == "":
+                        print(f"Debug: API key found but is empty string")
                         api_key = None
-                if not api_key:
-                    self.root.after(0, lambda: messagebox.showerror("DeepSeek", "Missing DEEPSEEK_API_KEY. Set environment variable or add to config.json."))
-                    return
-                url = "https://api.deepseek.com/v1/chat/completions"
-                def _map_model(name):
-                    n = (name or "").strip().lower()
-                    if n in ("deepseek-v3", "deepseek_chat", "deepseek-chat", "v3"):
+                    
+                    # Try one more approach: direct assignment for testing
+                    # Uncomment the line below and replace with your actual API key for testing
+                    # api_key = "your-actual-api-key-here"
+                    
+                    if not api_key:
+                        # Use QMetaObject.invokeMethod to show message box on main thread
+                        error_msg = "Missing DEEPSEEK_API_KEY. Set environment variable or add to config.json."
+                        QMetaObject.invokeMethod(
+                            thread_helper,
+                            "show_error_message",
+                            Qt.QueuedConnection,
+                            Q_ARG(str, error_msg)
+                        )
+                        return
+                    
+                    # Debug: API key found, continue with request
+                    print("Debug: API key found, continuing with request")
+                    
+                    url = "https://api.deepseek.com/v1/chat/completions"
+                    
+                    def _map_model(name):
+                        n = (name or "").strip().lower()
+                        if n in ("deepseek-v3", "deepseek_chat", "deepseek-chat", "v3"):
+                            return "deepseek-chat"
+                        if n in ("deepseek-r1", "r1", "deepseek-reasoner", "deepseek-reasoner"):
+                            return "deepseek-reasoner"
                         return "deepseek-chat"
-                    if n in ("deepseek-r1", "r1", "deepseek-reasoner", "deepseek-reasoner"):
-                        return "deepseek-reasoner"
-                    return "deepseek-chat"
-                payload = {
-                    "model": _map_model(model_name),
-                    "messages": [
-                        {"role": "system", "content": "You are a helpful assistant specialized in musical tempo analysis."},
-                        {"role": "user", "content": instruction},
-                    ],
-                    "stream": False
-                }
-                data = json.dumps(payload).encode('utf-8')
-                req = urllib.request.Request(url, data=data, method='POST')
-                req.add_header('Authorization', f'Bearer {api_key}')
-                req.add_header('Content-Type', 'application/json')
-
-                # Use certifi CA bundle to avoid SSL certificate verify failures on macOS
-                try:
-                    import ssl, certifi
-                    ssl_context = ssl.create_default_context(cafile=certifi.where())
-                except Exception:
-                    import ssl
-                    ssl_context = ssl.create_default_context()
-
-                try:
+                    
+                    payload = {
+                        "model": _map_model(model_dropdown.currentText()),
+                        "messages": [
+                            {"role": "system", "content": "You are a helpful assistant specialized in musical tempo analysis."},
+                            {"role": "user", "content": instruction},
+                        ],
+                        "stream": False
+                    }
+                    
+                    data = json.dumps(payload).encode('utf-8')
+                    req = urllib.request.Request(url, data=data, method='POST')
+                    req.add_header('Authorization', f'Bearer {api_key}')
+                    req.add_header('Content-Type', 'application/json')
+                    
+                    # Use certifi CA bundle to avoid SSL certificate verify failures on macOS
+                    try:
+                        import ssl, certifi
+                        ssl_context = ssl.create_default_context(cafile=certifi.where())
+                    except ImportError:
+                        # Fallback to default SSL context if certifi is not available
+                        ssl_context = ssl.create_default_context()
+                    
                     with urllib.request.urlopen(req, timeout=180, context=ssl_context) as resp:
                         body = resp.read().decode('utf-8')
-                except urllib.error.HTTPError as e:
-                    try:
-                        body = e.read().decode('utf-8', 'ignore')
-                    except Exception:
-                        body = ''
-                    raise Exception(f"HTTP {e.code}: {body}")
-                except urllib.error.URLError as e:
-                    raise Exception(f"Network error: {getattr(e, 'reason', e)}")
-                result = json.loads(body)
-                msg = result.get('choices', [{}])[0].get('message', {})
-                content = msg.get('content', '')
-                reasoning = msg.get('reasoning', '')
-                if reasoning:
-                    content = f"### Reasoning\n{reasoning}\n\n### Answer\n{content}" if content else f"### Reasoning\n{reasoning}"
-                if not content:
-                    content = "(No content returned)"
-                def append_text():
-                    try:
-                        summary_text_widget.config(state=tk.NORMAL)
-                        summary_text_widget.insert(tk.END, "\n\nAI Feedback (DeepSeek)\n\n")
-                        # Full Markdown rendering: headings, bold/italic, inline code, code blocks,
-                        # lists (ordered/unordered with indentation), blockquotes, horizontal rules, links.
-                        import re, webbrowser
-                        def insert_markdown(widget, md):
-                            # Tag setup
-                            try:
-                                widget.tag_configure('h1', font=('Arial', 14, 'bold'))
-                                widget.tag_configure('h2', font=('Arial', 13, 'bold'))
-                                widget.tag_configure('h3', font=('Arial', 12, 'bold'))
-                                widget.tag_configure('h4', font=('Arial', 11, 'bold'))
-                                widget.tag_configure('h5', font=('Arial', 10, 'bold'))
-                                widget.tag_configure('h6', font=('Arial', 10))
-                                widget.tag_configure('bold', font=('Arial', 10, 'bold'))
-                                widget.tag_configure('italic', font=('Arial', 10, 'italic'))
-                                widget.tag_configure('code', font=('Courier', 10))
-                                widget.tag_configure('codeblock', font=('Courier', 10), background='#f5f5f5')
-                                widget.tag_configure('quote', lmargin1=20, lmargin2=20, background='#f9f9f9')
-                                widget.tag_configure('hr', foreground='#888888')
-                                widget.tag_configure('list1', lmargin1=20, lmargin2=20)
-                                widget.tag_configure('list2', lmargin1=40, lmargin2=40)
-                                widget.tag_configure('list3', lmargin1=60, lmargin2=60)
-                            except Exception:
-                                pass
-
-                            link_counter = 0
-
-                            def apply_inline(text):
-                                # Returns list of (segment_text, tags, extra)
-                                segments = []
-                                i = 0
-                                while i < len(text):
-                                    # Links: [text](url)
-                                    m = re.search(r"\[([^\]]+)\]\(([^)]+)\)", text[i:])
-                                    if m:
-                                        pre = text[i:i+m.start()]
-                                        if pre:
-                                            segments.append((pre, [], None))
-                                        link_text = m.group(1)
-                                        link_url = m.group(2)
-                                        segments.append((link_text, ['link'], link_url))
-                                        i += m.end()
-                                        continue
-                                    # Inline code: `code`
-                                    m = re.search(r"`([^`]+)`", text[i:])
-                                    if m:
-                                        pre = text[i:i+m.start()]
-                                        if pre:
-                                            segments.append((pre, [], None))
-                                        code_text = m.group(1)
-                                        segments.append((code_text, ['code'], None))
-                                        i += m.end()
-                                        continue
-                                    # Bold: **text** or __text__
-                                    m = re.search(r"\*\*([^*]+)\*\*|__([^_]+)__", text[i:])
-                                    if m:
-                                        pre = text[i:i+m.start()]
-                                        if pre:
-                                            segments.append((pre, [], None))
-                                        bold_text = m.group(1) if m.group(1) is not None else m.group(2)
-                                        segments.append((bold_text, ['bold'], None))
-                                        i += m.end()
-                                        continue
-                                    # Italic: *text* or _text_
-                                    m = re.search(r"(?<!\*)\*([^*]+)\*(?!\*)|(?<!_)_([^_]+)_", text[i:])
-                                    if m:
-                                        pre = text[i:i+m.start()]
-                                        if pre:
-                                            segments.append((pre, [], None))
-                                        italic_text = m.group(1) if m.group(1) is not None else m.group(2)
-                                        segments.append((italic_text, ['italic'], None))
-                                        i += m.end()
-                                        continue
-                                    # No more markup
-                                    segments.append((text[i:], [], None))
-                                    break
-                                return segments
-
-                            # Create per-link tags with click behavior
-                            def insert_with_tags(line_text, base_tag=None):
-                                nonlocal link_counter
-                                segments = apply_inline(line_text)
-                                start_index = widget.index(tk.END)
-                                for seg_text, tags, extra in segments:
-                                    segment_start = widget.index(tk.END)
-                                    widget.insert(tk.END, seg_text)
-                                    applied_tags = []
-                                    if base_tag:
-                                        applied_tags.append(base_tag)
-                                    for t in tags:
-                                        if t == 'link':
-                                            tag_name = f"link_{link_counter}"
-                                            link_counter += 1
-                                            try:
-                                                widget.tag_configure(tag_name, foreground='blue', underline=True)
-                                                def _open(url=extra):
-                                                    try:
-                                                        webbrowser.open(url)
-                                                    except Exception:
-                                                        pass
-                                                widget.tag_bind(tag_name, '<Button-1>', lambda e, f=_open: f())
-                                            except Exception:
-                                                pass
-                                            applied_tags.append(tag_name)
-                                        else:
-                                            applied_tags.append(t)
-                                    for t in applied_tags:
-                                        try:
-                                            widget.tag_add(t, segment_start, widget.index(tk.END))
-                                        except Exception:
-                                            pass
-                                widget.insert(tk.END, "\n")
-
-                            # Parse block-level elements
-                            lines = md.splitlines()
-                            in_codeblock = False
-                            codeblock_buffer = []
-                            for raw in lines:
-                                line = raw.rstrip('\n')
-                                if in_codeblock:
-                                    if line.strip().startswith('```'):
-                                        # Flush code block
-                                        code_text = "\n".join(codeblock_buffer) + "\n"
-                                        start = widget.index(tk.END)
-                                        widget.insert(tk.END, code_text)
-                                        try:
-                                            widget.tag_add('codeblock', start, widget.index(tk.END))
-                                        except Exception:
-                                            pass
-                                        codeblock_buffer = []
-                                        in_codeblock = False
-                                    else:
-                                        codeblock_buffer.append(line)
-                                    continue
-
-                                # Start code block
-                                if line.strip().startswith('```'):
-                                    in_codeblock = True
-                                    codeblock_buffer = []
-                                    continue
-
-                                if not line.strip():
-                                    widget.insert(tk.END, "\n")
-                                    continue
-
-                                # Headings
-                                m = re.match(r"^(#{1,6})\s+(.*)$", line)
-                                if m:
-                                    level = len(m.group(1))
-                                    text = m.group(2)
-                                    tag = f"h{level}"
-                                    insert_with_tags(text, base_tag=tag)
-                                    continue
-
-                                # Horizontal rule
-                                if re.match(r"^\s*(\*{3,}|-{3,}|_{3,})\s*$", line):
-                                    widget.insert(tk.END, "-" * 80 + "\n")
-                                    continue
-
-                                # Blockquote
-                                if re.match(r"^>\s?(.*)$", line):
-                                    quote_text = re.sub(r"^>\s?", "", line)
-                                    insert_with_tags(quote_text, base_tag='quote')
-                                    continue
-
-                                # Lists (unordered and ordered), with indentation
-                                lm = re.match(r"^(\s*)([-*+]\s+)(.*)$", line)
-                                om = re.match(r"^(\s*)(\d+\.\s+)(.*)$", line)
-                                if lm or om:
-                                    indent = len((lm or om).group(1)) // 2
-                                    indent_tag = 'list1' if indent == 1 else ('list2' if indent == 2 else ('list3' if indent >= 3 else None))
-                                    bullet = '• ' if lm else (om.group(2))
-                                    content_text = (lm or om).group(3)
-                                    insert_with_tags(bullet + content_text, base_tag=indent_tag)
-                                    continue
-
-                                # Tables: simple pipe-delimited rows
-                                if '|' in line:
-                                    # Render as monospaced row
-                                    insert_with_tags(line.replace('|', ' | '), base_tag='code')
-                                    continue
-
-                                # Paragraph
-                                insert_with_tags(line)
-
-                        insert_markdown(summary_text_widget, content.strip())
-                        summary_text_widget.config(state=tk.DISABLED)
-                    except Exception:
-                        pass
-                self.root.after(0, append_text)
-            except Exception as e:
-                self.root.after(0, lambda err=e: messagebox.showerror("DeepSeek", f"API error: {err}"))
-
-        try:
-            summary_text_widget.config(state=tk.NORMAL)
-            summary_text_widget.insert(tk.END, "\n" + ("-" * 80) + "\nGenerating AI feedback...\n")
-            summary_text_widget.config(state=tk.DISABLED)
-        except Exception:
-            pass
-        import threading
-        threading.Thread(target=request_thread, daemon=True).start()
-
-    def show_mic_bpm_timeseries(self):
-        """Show microphone BPM time series data in a new window"""
-        try:
-            # Prefer recorded data if available; otherwise use live mic time series
-            if hasattr(self, 'recorded_mic_bpm_data') and self.recorded_mic_bpm_data:
-                data = self.recorded_mic_bpm_data
-            elif hasattr(self, 'mic_time_bpm_pairs') and self.mic_time_bpm_pairs:
-                data = self.mic_time_bpm_pairs
-            else:
-                messagebox.showinfo("Information", "No microphone BPM time series data found")
-                return
-
-            timeseries_window = tk.Toplevel(self.root)
-            timeseries_window.title("Microphone BPM Variation Over Time")
-            timeseries_window.geometry("600x400")
-            timeseries_window.resizable(True, True)
-
-            title_label = ttk.Label(
-                timeseries_window,
-                text="Microphone BPM Variations",
-                font=("Arial", 12, "bold")
-            )
-            title_label.pack(pady=10)
-
-            table_frame = ttk.Frame(timeseries_window)
-            table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-            y_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL)
-            y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-
-            x_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL)
-            x_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-
-            tree = ttk.Treeview(
-                table_frame,
-                columns=("time", "bpm"),
-                show="headings",
-                yscrollcommand=y_scroll.set,
-                xscrollcommand=x_scroll.set
-            )
-            tree.heading("time", text="Time (min:sec)")
-            tree.heading("bpm", text="BPM")
-            tree.column("time", anchor=tk.CENTER, width=150)
-            tree.column("bpm", anchor=tk.CENTER, width=100)
-            tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-            y_scroll.config(command=tree.yview)
-            x_scroll.config(command=tree.xview)
-
-            for pair in data:
-                try:
-                    t, bpm = pair
-                    t_str = self._format_time(float(t))
-                    bpm_str = f"{float(bpm):.1f}" if float(bpm) > 0 else "--"
-                except Exception:
-                    t_str = "--"
-                    bpm_str = "--"
-                tree.insert("", "end", values=(t_str, bpm_str))
-
-            # Bottom controls: export button and statistics (match file window style)
-            button_frame = ttk.Frame(timeseries_window)
-            button_frame.pack(fill=tk.X, padx=10, pady=10)
-
-            export_btn = ttk.Button(button_frame, text="Export Data", command=self.export_mic_bpm_timeseries)
-            export_btn.pack(side=tk.RIGHT)
-
-            try:
-                bpm_values = [float(b) for _, b in data if float(b) > 0]
-                if bpm_values:
-                    avg_bpm = np.mean(bpm_values)
-                    min_bpm = np.min(bpm_values)
-                    max_bpm = np.max(bpm_values)
-                    std_bpm = np.std(bpm_values)
-                else:
-                    avg_bpm = min_bpm = max_bpm = std_bpm = 0.0
-                stats_text = f"Statistics: Average BPM = {avg_bpm:.1f}, Minimum BPM = {min_bpm:.1f}, Maximum BPM = {max_bpm:.1f}, Standard Deviation = {std_bpm:.1f}"
-            except Exception:
-                stats_text = "Statistics: No data"
-            stats_label = ttk.Label(timeseries_window, text=stats_text, foreground="#555555")
-            stats_label.pack(pady=5)
-        except Exception as e:
-            print(f"Error showing mic BPM timeseries: {e}")
-
-    def show_bpm_timeseries(self):
-        """
-        Show BPM variation data over time
-        Create a new window with a table displaying BPM values for each time segment
-        """
-        # Ensure data exists
-        if not hasattr(self, 'time_bpm_pairs') or not self.time_bpm_pairs:
-            messagebox.showinfo("Information", "No BPM time series data found")
-            return
-        
-        # Create new window
-        timeseries_window = tk.Toplevel(self.root)
-        timeseries_window.title("BPM Variation Over Time")
-        timeseries_window.geometry("600x400")
-        timeseries_window.resizable(True, True)
-        
-        # Add title
-        title_label = ttk.Label(
-            timeseries_window, 
-            text=f"Audio File BPM Variations ({self.get_filename()})",
-            font=("Arial", 12, "bold")
-        )
-        title_label.pack(pady=10)
-        
-        # Create frame for table
-        table_frame = ttk.Frame(timeseries_window)
-        table_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        # Create vertical scrollbar
-        y_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL)
-        y_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        # Create horizontal scrollbar
-        x_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL)
-        x_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-        
-        # Create table
-        tree = ttk.Treeview(
-            table_frame,
-            columns=("time", "bpm"),
-            show="headings",
-            yscrollcommand=y_scroll.set,
-            xscrollcommand=x_scroll.set
-        )
-        
-        # Configure columns
-        tree.column("time", anchor=tk.CENTER, width=150)
-        tree.column("bpm", anchor=tk.CENTER, width=100)
-        
-        # Set column headings
-        tree.heading("time", text="Time (min:sec)")
-        tree.heading("bpm", text="BPM")
-        
-        # Fill data
-        for time_seconds, bpm in self.time_bpm_pairs:
-            # Convert seconds to min:sec format
-            minutes = int(time_seconds // 60)
-            seconds = int(time_seconds % 60)
-            time_str = f"{minutes:02d}:{seconds:02d}"
-            # Add to table
-            tree.insert("", tk.END, values=(time_str, round(bpm, 1)))
-        
-        tree.pack(fill=tk.BOTH, expand=True)
-        
-        # Configure scrollbars
-        y_scroll.config(command=tree.yview)
-        x_scroll.config(command=tree.xview)
-        
-        # Add export button
-        button_frame = ttk.Frame(timeseries_window)
-        button_frame.pack(fill=tk.X, padx=10, pady=10)
-        
-        export_btn = ttk.Button(
-            button_frame,
-            text="Export Data",
-            command=lambda: self.export_bpm_timeseries()
-        )
-        export_btn.pack(side=tk.RIGHT)
-        
-        # Add statistics information
-        stats_label = self._create_bpm_stats_label(timeseries_window)
-        stats_label.pack(pady=5)
-    
-    def _create_bpm_stats_label(self, parent):
-        """
-        Create label displaying BPM statistics
-        
-        Parameters:
-            parent: Parent widget
+                    
+                    result = json.loads(body)
+                    msg = result.get('choices', [{}])[0].get('message', {})
+                    content = msg.get('content', '')
+                    reasoning = msg.get('reasoning', '')
+                    if reasoning:
+                        content = f"### Reasoning\n{reasoning}\n\n### Answer\n{content}" if content else f"### Reasoning\n{reasoning}"
+                    if not content:
+                        content = "(No content returned)"
+                    
+                    # Update the feedback text widget in the main thread
+                    QMetaObject.invokeMethod(
+                        thread_helper,
+                        "update_feedback_text",
+                        Qt.QueuedConnection,
+                        Q_ARG(str, content)
+                    )
+                    
+                except Exception as e:
+                    # Use QMetaObject.invokeMethod to show message box on main thread
+                    error_msg = f"Error calling DeepSeek API: {str(e)}"
+                    QMetaObject.invokeMethod(
+                        thread_helper,
+                        "show_error_message",
+                        Qt.QueuedConnection,
+                        Q_ARG(str, error_msg)
+                    )
             
-        Returns:
-            Configured label widget
-        """
-        if not hasattr(self, 'time_bpm_pairs') or not self.time_bpm_pairs:
-            return ttk.Label(parent, text="No statistics available")
+            # Start the request in a background thread
+            threading.Thread(target=request_thread, daemon=True).start()
         
-        # Extract all BPM values
-        bpm_values = [bpm for _, bpm in self.time_bpm_pairs]
+        # Import QObject and Slot for the helper class
+        from PySide6.QtCore import QObject, Slot
         
-        # Calculate statistics
-        avg_bpm = np.mean(bpm_values)
-        min_bpm = np.min(bpm_values)
-        max_bpm = np.max(bpm_values)
-        std_bpm = np.std(bpm_values)
-        
-        # Create statistics text
-        stats_text = f"Statistics: Average BPM = {avg_bpm:.1f}, Minimum BPM = {min_bpm:.1f}, Maximum BPM = {max_bpm:.1f}, Standard Deviation = {std_bpm:.1f}"
-        
-        return ttk.Label(parent, text=stats_text, foreground="#555555")
-    
-    def export_bpm_timeseries(self):
-        """
-        Export BPM time series data to CSV format
-        """
-        if not hasattr(self, 'time_bpm_pairs') or not self.time_bpm_pairs:
-            messagebox.showinfo("Information", "No BPM time series data found")
-            return
-        
-        try:
-            # Show save file dialog
-            file_path = filedialog.asksaveasfilename(
-                defaultextension=".csv",
-                filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
-                title="Export BPM Data"
-            )
+        # Create a helper object with slots that can be called from background threads
+        class ThreadHelper(QObject):
+            """Helper class with slots that can be invoked from background threads"""
+            def __init__(self, parent_dialog, feedback_text):
+                super().__init__()
+                self.parent_dialog = parent_dialog
+                self.feedback_text = feedback_text
             
-            if not file_path:
-                return  # User cancelled operation
+            @Slot(str)
+            def show_error_message(self, message):
+                """Slot to show error message from background thread"""
+                QMessageBox.critical(self.parent_dialog, "DeepSeek Error", message)
             
-            # Write to CSV file
-            import csv
-            with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
-                csv_writer = csv.writer(csvfile)
-                # Write header
-                csv_writer.writerow(["Time (seconds)", "Time (min:sec)", "BPM"])
-                # Write data
-                for time_seconds, bpm in self.time_bpm_pairs:
-                    # Convert seconds to min:sec format
-                    minutes = int(time_seconds // 60)
-                    seconds = int(time_seconds % 60)
-                    time_str = f"{minutes:02d}:{seconds:02d}"
-                    csv_writer.writerow([time_seconds, time_str, round(bpm, 1)])
-            
-            messagebox.showinfo("Success", f"BPM data successfully exported to:\n{file_path}")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Error exporting data:\n{str(e)}")
-    
-    def export_mic_bpm_timeseries(self):
-        """
-        Export microphone BPM time series data to CSV format
-        """
-        # Determine source
-        if hasattr(self, 'recorded_mic_bpm_data') and self.recorded_mic_bpm_data:
-            pairs = self.recorded_mic_bpm_data
-        elif hasattr(self, 'mic_time_bpm_pairs') and self.mic_time_bpm_pairs:
-            pairs = self.mic_time_bpm_pairs
+            @Slot(str)
+            def update_feedback_text(self, content):
+                """Slot to update feedback text from background thread, converting markdown to HTML"""
+                # Convert markdown to HTML
+                from markdown import markdown
+                html_content = markdown(content)
+                self.feedback_text.setHtml(html_content)
+        
+        # Create the helper object with reference to the feedback text widget
+        thread_helper = ThreadHelper(dialog, self.feedback_text)
+        
+        # Connect Generate button to the function
+        generate_button.clicked.connect(_generate_deepseek_summary)
+        
+        # Comparison Metrics section
+        metrics_label = QLabel("COMPARISON METRICS:")
+        metrics_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #1a1a1a; margin-top: 10px;")
+        top_summary_layout.addWidget(metrics_label)
+        
+        metrics_text = f"Reference BPM (Score): {ref_avg:.1f}\n"
+        metrics_text += f"Your Average BPM: {mic_avg:.1f}\n"
+        metrics_text += f"BPM Difference: {difference:+.1f} ({percentage_diff:+.1f}%)\n"
+        metrics_label_content = QLabel(metrics_text)
+        metrics_label_content.setStyleSheet("font-size: 13px; margin-left: 15px; margin-bottom: 15px;")
+        top_summary_layout.addWidget(metrics_label_content)
+        
+        # Detailed Evaluation section
+        eval_label = QLabel("DETAILED EVALUATION:")
+        eval_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #1a1a1a; margin-top: 10px;")
+        top_summary_layout.addWidget(eval_label)
+        
+        eval_text = "<ul>"
+        eval_text += f"<li><span style='color: {'green' if speed_accuracy in ['Excellent', 'Good'] else 'red'};'>{'✓' if speed_accuracy in ['Excellent', 'Good'] else '✗'}</span> <strong>Speed Accuracy</strong>: {speed_accuracy} - {'Your performance speed is very close to the score' if speed_accuracy == 'Excellent' else 'Your performance speed is close to the score' if speed_accuracy == 'Good' else 'Your performance speed differs significantly from the score'}</li>"
+        eval_text += f"<li><span style='color: {'green' if rhythm_stability_eval in ['Excellent', 'Good'] else 'red'};'>{'✓' if rhythm_stability_eval in ['Excellent', 'Good'] else '✗'}</span> <strong>Rhythm Stability</strong>: {rhythm_stability_eval} - {'Your rhythm is consistent and stable' if rhythm_stability_eval == 'Excellent' else 'Your rhythm has minor fluctuations' if rhythm_stability_eval == 'Good' else 'Your rhythm has significant fluctuations'}</li>"
+        eval_text += f"<li><span style='color: {'green' if timing_consistency_eval in ['Excellent', 'Good'] else 'red'};'>{'✓' if timing_consistency_eval in ['Excellent', 'Good'] else '✗'}</span> <strong>Timing Consistency</strong>: {timing_consistency_eval} - {'Your timing is very consistent' if timing_consistency_eval == 'Excellent' else 'Your timing is mostly consistent' if timing_consistency_eval == 'Good' else 'Your timing has noticeable inconsistencies'}</li>"
+        eval_text += f"<li><span style='color: {'green' if expression_style_eval in ['Excellent', 'Good'] else 'red'};'>{'✓' if expression_style_eval in ['Excellent', 'Good'] else '✗'}</span> <strong>Expression & Style</strong>: {expression_style_eval} - {'Your performance demonstrates professional musical expression' if expression_style_eval == 'Excellent' else 'Your performance shows good musical expression' if expression_style_eval == 'Good' else 'Your performance lacks musical expression'}</li>"
+        eval_text += "</ul>"
+        
+        eval_label_content = QLabel(eval_text)
+        eval_label_content.setStyleSheet("font-size: 13px; margin-left: 15px; margin-bottom: 15px;")
+        eval_label_content.setTextFormat(Qt.RichText)
+        top_summary_layout.addWidget(eval_label_content)
+        
+        # Improvement Suggestions section
+        improve_label = QLabel("IMPROVEMENT SUGGESTIONS:")
+        improve_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #1a1a1a; margin-top: 10px;")
+        top_summary_layout.addWidget(improve_label)
+        
+        suggestions = [
+            "Practice with a metronome to improve your sense of rhythm",
+            "Record yourself regularly to identify rhythmic inconsistencies",
+            "Focus on maintaining a steady tempo throughout your performance",
+            "Start slowly and gradually increase speed as you gain consistency"
+        ]
+        
+        suggestions_text = "<ul>"
+        for suggestion in suggestions:
+            suggestions_text += f"<li>{suggestion}</li>"
+        suggestions_text += "</ul>"
+        
+        suggestions_label = QLabel(suggestions_text)
+        suggestions_label.setStyleSheet("font-size: 13px; margin-left: 15px; margin-bottom: 15px;")
+        suggestions_label.setTextFormat(Qt.RichText)
+        top_summary_layout.addWidget(suggestions_label)
+        
+        # Advanced Performance Metrics section
+        advanced_label = QLabel("ADVANCED PERFORMANCE METRICS:")
+        advanced_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #1a1a1a; margin-top: 10px;")
+        top_summary_layout.addWidget(advanced_label)
+        
+        advanced_text = "<ul>"
+        advanced_text += f"<li><strong>Rhythm Stability</strong>: Stability Score: {rhythm_stability:.2f}/10</li>"
+        advanced_text += f"<li><strong>Timing Consistency</strong>:</li>"
+        advanced_text += f"<ul style='margin-left: 20px;'>"
+        advanced_text += f"<li>Within ±5% of reference: {within_5_percent:.1f}%</li>"
+        advanced_text += f"<li>Within ±10% of reference: {within_10_percent:.1f}%</li>"
+        advanced_text += f"<li>Within ±15% of reference: {within_15_percent:.1f}%</li>"
+        advanced_text += "</ul></li>"
+        advanced_text += f"<li><strong>Tempo Progression</strong>: Performance Trend: {'Consistent' if rhythm_stability <= 3 else 'Slight Fluctuations' if rhythm_stability <= 6 else 'Significant Variations'}</li>"
+        advanced_text += "</ul>"
+        
+        advanced_label_content = QLabel(advanced_text)
+        advanced_label_content.setStyleSheet("font-size: 13px; margin-left: 15px; margin-bottom: 15px;")
+        advanced_label_content.setTextFormat(Qt.RichText)
+        top_summary_layout.addWidget(advanced_label_content)
+        
+        # Interpretation section
+        interpretation_label = QLabel("INTERPRETATION:")
+        interpretation_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #1a1a1a; margin-top: 10px;")
+        top_summary_layout.addWidget(interpretation_label)
+        
+        interpretation_text = "<ul>"
+        if rhythm_stability <= 3:
+            interpretation_text += "<li>Your rhythm is very consistent with minimal fluctuations.</li>"
+        elif rhythm_stability <= 6:
+            interpretation_text += "<li>Your rhythm has noticeable fluctuations that should be addressed.</li>"
         else:
-            messagebox.showinfo("Information", "No microphone BPM time series data found")
-            return
-        try:
-            file_path = filedialog.asksaveasfilename(
-                defaultextension=".csv",
-                filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
-                title="Export Microphone BPM Data"
+            interpretation_text += "<li>Your rhythm has significant variations that require improvement.</li>"
+        
+        if within_10_percent >= 80:
+            interpretation_text += "<li>Your timing is mostly consistent with occasional variations.</li>"
+        else:
+            interpretation_text += "<li>Your timing needs improvement to achieve more consistent performance.</li>"
+        interpretation_text += "</ul>"
+        
+        interpretation_label_content = QLabel(interpretation_text)
+        interpretation_label_content.setStyleSheet("font-size: 13px; margin-left: 15px; margin-bottom: 15px;")
+        interpretation_label_content.setTextFormat(Qt.RichText)
+        top_summary_layout.addWidget(interpretation_label_content)
+        
+        # Spacer to push content up
+        top_summary_layout.addStretch()
+        
+        # Add summary tab
+        tab_widget.addTab(summary_tab, "Summary & Metrics")
+        
+        # --- Visual Comparison Tab --- #
+        visual_tab = QWidget()
+        visual_layout = QVBoxLayout(visual_tab)
+        visual_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Create a scroll area for better navigation
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(False)  # Set to False so scrollbars appear when content is larger than viewport
+        scroll_area.setFixedHeight(600)  # Set a fixed height to ensure scrollbars appear
+        scroll_area.setStyleSheet("QScrollArea { border: none; } QScrollBar:vertical { width: 15px; } QScrollBar::handle:vertical { background-color: #c1c1c1; border-radius: 7px; }")
+        
+        # Create a container widget for the scroll area
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setSpacing(40)  # Increase spacing between charts to 40 pixels
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Import matplotlib components
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
+        from bpm_visuals import plot_bpm_timeseries, plot_distributions, plot_deviation_heatmap
+        
+        # --- Plot 1: Real-time Microphone BPM vs Reference BPM (Time Series) --- #
+        fig1 = Figure(figsize=(8, 4), dpi=100)  # Reduced size from 12x6 to 8x4
+        ax1 = fig1.add_subplot(111)
+        plot_bpm_timeseries(ax1, mic_times, mic_bpms, ref_avg, reference_pairs=self.time_bpm_pairs)
+        
+        # Unify font sizes
+        ax1.set_title(ax1.get_title(), fontsize=10, fontweight='bold', pad=6)
+        for label in ax1.get_xticklabels() + ax1.get_yticklabels():
+            label.set_fontsize(8)
+        ax1.set_xlabel(ax1.get_xlabel(), fontsize=8)
+        ax1.set_ylabel(ax1.get_ylabel(), fontsize=8)
+        
+        fig1.tight_layout(pad=3.0)  # Add padding around the figure
+        canvas1 = FigureCanvasQTAgg(fig1)
+        canvas1.setStyleSheet("background-color: white; border: 1px solid #d2d2d7; border-radius: 6px;")
+        scroll_layout.addWidget(canvas1)
+        
+        # --- Plot 2: BPM Distribution (Mic vs Reference) --- #
+        fig2 = Figure(figsize=(8, 3), dpi=100)  # Reduced size from 12x5 to 8x3
+        ax2 = fig2.add_subplot(111)
+        
+        # Plot violin plot for BPM distribution comparison
+        violin_parts = ax2.violinplot([mic_bpms, ref_bpms], positions=[1, 2], showmeans=True, showmedians=True)
+        
+        # Customize violin plot
+        for i, pc in enumerate(violin_parts['bodies']):
+            pc.set_facecolor('#2E86AB' if i == 0 else '#A23B72')
+            pc.set_alpha(0.6)
+        
+        if 'cbars' in violin_parts:
+            violin_parts['cbars'].set_color('#333333')
+        if 'cmins' in violin_parts:
+            violin_parts['cmins'].set_color('#333333')
+        if 'cmaxes' in violin_parts:
+            violin_parts['cmaxes'].set_color('#333333')
+        if 'cmeans' in violin_parts:
+            violin_parts['cmeans'].set_color('#F18F01')
+        if 'cmedians' in violin_parts:
+            violin_parts['cmedians'].set_color('#333333')
+        
+        # Configure violin plot
+        ax2.set_title('BPM Distribution (Mic vs Reference)', fontsize=10, fontweight='bold', pad=6)
+        ax2.set_ylabel('BPM', fontsize=8)
+        ax2.set_xticks([1, 2])
+        ax2.set_xticklabels(['Mic', 'Reference'], fontsize=8)
+        ax2.grid(True, alpha=0.3)
+        
+        # Add mean and median labels
+        mean_mic = float(np.mean(mic_bpms)) if len(mic_bpms) > 0 else float('nan')
+        median_mic = float(np.median(mic_bpms)) if len(mic_bpms) > 0 else float('nan')
+        mean_ref = float(np.mean(ref_bpms)) if len(ref_bpms) > 0 else float('nan')
+        median_ref = float(np.median(ref_bpms)) if len(ref_bpms) > 0 else float('nan')
+        
+        if np.isfinite(mean_mic) and np.isfinite(median_mic):
+            ax2.text(1, mean_mic, f'Mean: {mean_mic:.1f}', color='#F18F01', fontsize=7, ha='center', va='bottom')
+            ax2.text(1, median_mic, f'Median: {median_mic:.1f}', color='#333333', fontsize=7, ha='center', va='top')
+        
+        if np.isfinite(mean_ref) and np.isfinite(median_ref):
+            ax2.text(2, mean_ref, f'Mean: {mean_ref:.1f}', color='#F18F01', fontsize=7, ha='center', va='bottom')
+            ax2.text(2, median_ref, f'Median: {median_ref:.1f}', color='#333333', fontsize=7, ha='center', va='top')
+        
+        # Unify tick font sizes
+        for label in ax2.get_yticklabels():
+            label.set_fontsize(8)
+        
+        fig2.tight_layout(pad=3.0)
+        canvas2 = FigureCanvasQTAgg(fig2)
+        canvas2.setStyleSheet("background-color: white; border: 1px solid #d2d2d7; border-radius: 6px;")
+        scroll_layout.addWidget(canvas2)
+        
+        # --- Plot 3: Deviation Distribution (Mic vs Reference) --- #
+        fig3 = Figure(figsize=(8, 3), dpi=100)  # Reduced size from 12x5 to 8x3
+        ax3 = fig3.add_subplot(111)
+        
+        # Calculate deviations
+        deviations = np.array(mic_bpms) - np.array(ref_bpms_interp)
+        
+        # Create box plot of deviations
+        bp = ax3.boxplot([deviations], positions=[1], patch_artist=True, widths=0.6)
+        
+        # Customize box plot
+        for box in bp['boxes']:
+            box.set_facecolor('#F18F01')
+            box.set_alpha(0.6)
+        
+        for median in bp['medians']:
+            median.set_color('#A23B72')
+            median.set_linewidth(2)
+        
+        # Add scatter plot for individual deviations
+        jitter = np.random.normal(0, 0.05, len(deviations))
+        ax3.scatter(np.ones_like(deviations) + jitter, deviations, alpha=0.3, color='#2E86AB', s=10)
+        
+        # Add reference lines
+        ax3.axhline(0, color='black', linestyle='-', linewidth=1)
+        ax3.axhline(np.mean(deviations), color='#A23B72', linestyle='--', linewidth=2, label=f'Mean diff: {np.mean(deviations):.2f}')
+        
+        # Configure deviation plot
+        ax3.set_title('Deviation Distribution (Mic vs Reference)', fontsize=10, fontweight='bold', pad=6)
+        ax3.set_ylabel('BPM difference', fontsize=8)
+        ax3.set_xticks([1])
+        ax3.set_xticklabels(['Diff'], fontsize=8)
+        ax3.legend(fontsize=8, loc='upper right')
+        
+        # Unify tick font sizes
+        for label in ax3.get_yticklabels():
+            label.set_fontsize(8)
+        ax3.grid(True, alpha=0.3)
+        
+        fig3.tight_layout(pad=3.0)
+        canvas3 = FigureCanvasQTAgg(fig3)
+        canvas3.setStyleSheet("background-color: white; border: 1px solid #d2d2d7; border-radius: 6px;")
+        scroll_layout.addWidget(canvas3)
+        
+        # --- Plot 4: Tempo Deviation Heatmap (%) --- #
+        fig4 = Figure(figsize=(8, 3), dpi=100)  # Reduced size from 12x5 to 8x3
+        ax4 = fig4.add_subplot(111)
+        plot_deviation_heatmap(ax4, mic_times, mic_bpms, ref_bpms_interp, ref_avg, segment_count=8)
+        
+        # Unify font sizes for heatmap
+        ax4.set_title(ax4.get_title(), fontsize=10, fontweight='bold', pad=6)
+        for label in ax4.get_xticklabels() + ax4.get_yticklabels():
+            label.set_fontsize(8)
+        if ax4.get_xlabel():
+            ax4.set_xlabel(ax4.get_xlabel(), fontsize=8)
+        if ax4.get_ylabel():
+            ax4.set_ylabel(ax4.get_ylabel(), fontsize=8)
+        
+        fig4.tight_layout(pad=3.0)
+        canvas4 = FigureCanvasQTAgg(fig4)
+        canvas4.setStyleSheet("background-color: white; border: 1px solid #d2d2d7; border-radius: 6px;")
+        scroll_layout.addWidget(canvas4)
+        
+        # --- Plot 5: Reference Heatmap --- #
+        fig5 = Figure(figsize=(8, 3), dpi=100)  # Reduced size from 12x5 to 8x3
+        ax5 = fig5.add_subplot(111)
+        
+        # Create data for reference heatmap - compare to reference average instead of itself
+        # This will show deviation from the average BPM, not from itself
+        ref_avg_series = np.array([ref_avg] * len(ref_bpms))
+        plot_deviation_heatmap(ax5, ref_times, ref_bpms, ref_avg_series, ref_avg, segment_count=8)
+        ax5.set_title('Reference Heatmap (%)', fontsize=10, fontweight='bold', pad=6)
+        
+        # Unify font sizes for reference heatmap
+        for label in ax5.get_xticklabels() + ax5.get_yticklabels():
+            label.set_fontsize(8)
+        if ax5.get_xlabel():
+            ax5.set_xlabel(ax5.get_xlabel(), fontsize=8)
+        if ax5.get_ylabel():
+            ax5.set_ylabel(ax5.get_ylabel(), fontsize=8)
+        
+        fig5.tight_layout(pad=3.0)
+        canvas5 = FigureCanvasQTAgg(fig5)
+        canvas5.setStyleSheet("background-color: white; border: 1px solid #d2d2d7; border-radius: 6px;")
+        scroll_layout.addWidget(canvas5)
+        
+        # --- Plot 6: Mic Heatmap --- #
+        fig6 = Figure(figsize=(8, 3), dpi=100)  # Reduced size from 12x5 to 8x3
+        ax6 = fig6.add_subplot(111)
+        
+        # Create data for mic heatmap
+        mic_avg_bpm = np.mean(mic_bpms)
+        mic_ref_series = np.array([mic_avg_bpm] * len(mic_bpms))
+        plot_deviation_heatmap(ax6, mic_times, mic_bpms, mic_ref_series, mic_avg_bpm, segment_count=8)
+        ax6.set_title('Mic Heatmap (%)', fontsize=10, fontweight='bold', pad=6)
+        
+        # Unify font sizes for mic heatmap
+        for label in ax6.get_xticklabels() + ax6.get_yticklabels():
+            label.set_fontsize(8)
+        if ax6.get_xlabel():
+            ax6.set_xlabel(ax6.get_xlabel(), fontsize=8)
+        if ax6.get_ylabel():
+            ax6.set_ylabel(ax6.get_ylabel(), fontsize=8)
+        
+        fig6.tight_layout(pad=3.0)
+        canvas6 = FigureCanvasQTAgg(fig6)
+        canvas6.setStyleSheet("background-color: white; border: 1px solid #d2d2d7; border-radius: 6px;")
+        scroll_layout.addWidget(canvas6)
+        
+        # Add spacer to the end
+        scroll_layout.addStretch()
+        
+        # Set up the scroll area
+        scroll_area.setWidget(scroll_widget)
+        visual_layout.addWidget(scroll_area)
+        
+        # Function to export to PDF
+        def export_to_pdf():
+            from PySide6.QtWidgets import QFileDialog
+            import tempfile
+            import os
+            import re
+            from matplotlib.figure import Figure
+            from matplotlib.backends.backend_pdf import PdfPages
+            
+            # Get save path from user
+            file_path, _ = QFileDialog.getSaveFileName(
+                dialog, "Export PDF", 
+                f"bpm_comparison_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf", 
+                "PDF Files (*.pdf);;All Files (*)"
             )
+            
             if not file_path:
                 return
-            import csv
-            with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow(["Time (seconds)", "Time (min:sec)", "Mic BPM"])
-                for time_seconds, bpm in pairs:
-                    minutes = int(time_seconds // 60)
-                    seconds = int(time_seconds % 60)
-                    time_str = f"{minutes:02d}:{seconds:02d}"
-                    bpm_out = round(float(bpm), 1) if isinstance(bpm, (int, float)) and float(bpm) > 0 else "--"
-                    writer.writerow([time_seconds, time_str, bpm_out])
-            messagebox.showinfo("Success", f"Microphone BPM data successfully exported to:\n{file_path}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Error exporting microphone BPM data:\n{str(e)}")
-
-    def get_filename(self):
-        """
-        Get the name of the currently selected file
+            
+            # Helper function to clean HTML tags
+            def clean_html(html):
+                # Process HTML to ensure proper line breaks for lists
+                # Replace list items with bullet points and newlines
+                html = html.replace('<li>', '\n• ')
+                html = html.replace('</li>', '')
+                
+                # Remove list container tags
+                html = html.replace('<ul>', '')
+                html = html.replace('</ul>', '')
+                html = html.replace('<ol>', '')
+                html = html.replace('</ol>', '')
+                
+                # Remove any remaining HTML tags
+                clean_text = re.sub(r'<[^>]+>', '', html)
+                
+                # Convert Windows-style newlines to Unix-style
+                clean_text = clean_text.replace('\r\n', '\n')
+                
+                # Preserve spaces within lines but ensure proper line breaks
+                lines = clean_text.split('\n')
+                cleaned_lines = []
+                for line in lines:
+                    # Remove leading/trailing spaces and collapse multiple spaces within the line
+                    cleaned_line = ' '.join(line.strip().split())
+                    if cleaned_line:
+                        cleaned_lines.append(cleaned_line)
+                
+                # Join lines with single newlines
+                clean_text = '\n'.join(cleaned_lines)
+                return clean_text
+            
+            # Create temporary directory for images
+            with tempfile.TemporaryDirectory() as temp_dir:
+                # Save Summary Metrics text
+                summary_text = f"BPM COMPARISON ANALYSIS REPORT\n\n"
+                
+                # Comparison Metrics
+                summary_text += f"COMPARISON METRICS:\n"
+                summary_text += metrics_text + "\n\n"
+                
+                # Detailed Evaluation
+                summary_text += f"DETAILED EVALUATION:\n"
+                clean_eval = clean_html(eval_text)
+                # Format evaluation points
+                summary_text += clean_eval + "\n\n"
+                
+                # Improvement Suggestions
+                summary_text += f"IMPROVEMENT SUGGESTIONS:\n"
+                clean_suggestions = clean_html(suggestions_text)
+                # Format suggestions as bullet points
+                suggestions_list = clean_suggestions.split('\n')
+                for suggestion in suggestions_list:
+                    if suggestion.strip():
+                        summary_text += f"- {suggestion.strip()}\n"
+                summary_text += "\n"
+                
+                # Advanced Performance Metrics
+                summary_text += f"ADVANCED PERFORMANCE METRICS:\n"
+                clean_advanced = clean_html(advanced_text)
+                # Format advanced metrics
+                advanced_lines = clean_advanced.split('\n')
+                for line in advanced_lines:
+                    if line.strip():
+                        summary_text += f"{line.strip()}\n"
+                summary_text += "\n"
+                
+                # Interpretation
+                summary_text += f"INTERPRETATION:\n"
+                clean_interpretation = clean_html(interpretation_text)
+                # Format interpretation as bullet points
+                interpretation_list = clean_interpretation.split('\n')
+                for interpretation in interpretation_list:
+                    if interpretation.strip():
+                        summary_text += f"- {interpretation.strip()}\n"
+                summary_text += "\n"
+                
+                # AI Feedback (DeepSeek)
+                if hasattr(self, 'feedback_text'):
+                    ai_feedback = self.feedback_text.toPlainText()
+                    if ai_feedback and ai_feedback.strip() != "":
+                        # Process markdown to plain text for PDF
+                        import re
+                        from markdown import markdown
+                        from bs4 import BeautifulSoup
+                        
+                        # Convert markdown to HTML first
+                        html_content = markdown(ai_feedback)
+                        
+                        # Use BeautifulSoup to extract plain text with proper formatting
+                        soup = BeautifulSoup(html_content, 'html.parser')
+                        
+                        # Process headings, lists, etc.
+                        for h in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+                            h.string = f"\n{h.text.strip()}:\n"
+                        
+                        for ul in soup.find_all('ul'):
+                            for li in ul.find_all('li'):
+                                li.string = f"• {li.text.strip()}\n"
+                        
+                        for ol in soup.find_all('ol'):
+                            for i, li in enumerate(ol.find_all('li')):
+                                li.string = f"{i+1}. {li.text.strip()}\n"
+                        
+                        # Extract plain text
+                        plain_text = soup.get_text()
+                        
+                        # Clean up extra newlines and spaces
+                        plain_text = re.sub(r'\n+', '\n', plain_text.strip())
+                        
+                        summary_text += f"AI FEEDBACK (DEEPSEEK):\n"
+                        summary_text += plain_text + "\n\n"
+                
+                # Save all charts
+                chart_paths = []
+                for i, canvas in enumerate([canvas1, canvas2, canvas3, canvas4, canvas5, canvas6]):
+                    chart_path = os.path.join(temp_dir, f"chart_{i+1}.png")
+                    canvas.figure.savefig(chart_path, dpi=300, bbox_inches='tight')
+                    chart_paths.append(chart_path)
+                
+                # Create PDF using matplotlib
+                with PdfPages(file_path) as pdf:
+                    # Set consistent width of 11 inches for all pages
+                    consistent_width = 11
+                    
+                    # Use legal size (11x14) for summary page to fit all content on one page
+                    # and letter size (11x8.5) for charts, both with same width
+                    fig_summary = Figure(figsize=(consistent_width, 14), dpi=300)  # Legal size for summary
+                    ax_summary = fig_summary.add_subplot(111)
+                    ax_summary.axis('off')
+                    
+                    # Add summary text with proper formatting
+                    ax_summary.text(0.1, 0.97, "BPM COMPARISON ANALYSIS REPORT", 
+                                  fontsize=16, fontweight='bold', ha='left', va='top')
+                    
+                    # Import textwrap for automatic line wrapping
+                    import textwrap
+                    
+                    # Maximum characters per line before wrapping
+                    max_line_length = 85
+                    
+                    # Process lines with automatic wrapping
+                    original_lines = summary_text.strip().split('\n')
+                    processed_lines = []
+                    
+                    for line in original_lines:
+                        if not line.strip():
+                            # Keep empty lines
+                            processed_lines.append('')
+                        elif line.strip().endswith(':') and len(line.strip()) > 10:
+                            # Keep section headers as-is
+                            processed_lines.append(line)
+                        elif line.strip().startswith('•'):
+                            # Wrap bullet points with indentation
+                            bullet_content = line[1:].strip()
+                            wrapped = textwrap.wrap(bullet_content, width=max_line_length-4)
+                            if wrapped:
+                                processed_lines.append(f'• {wrapped[0]}')
+                                for wrapped_line in wrapped[1:]:
+                                    processed_lines.append(f'  {wrapped_line}')
+                        elif re.match(r'^\d+\.', line.strip()):
+                            # Wrap numbered lists with indentation
+                            parts = line.split('. ', 1)
+                            if len(parts) == 2:
+                                number, content = parts
+                                wrapped = textwrap.wrap(content, width=max_line_length-len(number)-2)
+                                if wrapped:
+                                    processed_lines.append(f'{number}. {wrapped[0]}')
+                                    for wrapped_line in wrapped[1:]:
+                                        processed_lines.append(f'  {wrapped_line}')
+                        else:
+                            # Wrap regular text
+                            wrapped = textwrap.wrap(line, width=max_line_length)
+                            processed_lines.extend(wrapped)
+                    
+                    # Add processed lines to the figure with proper spacing
+                    y_pos = 0.92
+                    line_height = 0.023  # Optimal line height to fit content
+                    
+                    for line in processed_lines:
+                        font_size = 11  # Slightly smaller font to fit more content
+                        font_weight = 'normal'
+                        
+                        # Apply bold to section headers
+                        if line.strip().endswith(':') and len(line.strip()) > 10:
+                            font_weight = 'bold'
+                            font_size = 14  # Adjusted header size
+                            y_pos -= 0.005  # Slight extra space before headers
+                        
+                        # Determine x position based on line type
+                        if line.startswith('  '):
+                            x_pos = 0.15  # Indented wrapped lines
+                        elif line.startswith('•') or (line.strip() and line[0].isdigit() and '.' in line.split()[0]):
+                            x_pos = 0.13  # Bullet points and numbered lists
+                        else:
+                            x_pos = 0.1   # Regular text and headers
+                        
+                        # Add text with wrapping enabled
+                        ax_summary.text(x_pos, y_pos, line, 
+                                      fontsize=font_size, 
+                                      fontweight=font_weight, 
+                                      ha='left', 
+                                      va='top',
+                                      wrap=True)
+                        y_pos -= line_height
+                    
+                    # Save summary page with tight layout - consistent width maintained by figure size
+                    pdf.savefig(fig_summary, bbox_inches='tight')
+                    
+                    # Subsequent pages: Visual Comparison charts (same width, standard height)
+                    for i, chart_path in enumerate(chart_paths):
+                        fig_chart = Figure(figsize=(consistent_width, 8.5), dpi=300)  # Same width, standard height
+                        ax_chart = fig_chart.add_subplot(111)
+                        ax_chart.axis('off')
+                        
+                        # Add chart image with proper scaling
+                        import matplotlib.image as mpimg
+                        img = mpimg.imread(chart_path)
+                        ax_chart.imshow(img, aspect='auto', extent=[0.1, 0.9, 0.1, 0.9])
+                        
+                        # Save chart page with tight layout - same width maintained by figure size
+                        pdf.savefig(fig_chart, bbox_inches='tight')
+                
+            QMessageBox.information(dialog, "Export Successful", f"PDF exported successfully to {file_path}")
         
-        Returns:
-            Filename (without path), or "Unknown File" if no file is selected
-        """
-        if hasattr(self, 'audio_file') and self.audio_file:
-            return os.path.basename(self.audio_file)
-        return "Unknown File"
+        # Connect Export button
+        export_button.clicked.connect(export_to_pdf)
+        
+        # Add visual tab
+        tab_widget.addTab(visual_tab, "Visual Comparison")
+        
+        # Add tab widget to main layout
+        main_layout.addWidget(tab_widget)
+        
+        # Bottom buttons
+        bottom_layout = QHBoxLayout()
+        bottom_layout.setContentsMargins(20, 10, 20, 20)
+        bottom_layout.addStretch()
+        
+        close_button = QPushButton("Close")
+        close_button.setFixedSize(80, 30)
+        close_button.setToolTip("Close the comparison window")
+        close_button.setStyleSheet("""
+            QPushButton {
+                background-color: #e5e5ea;
+                border: none;
+                border-radius: 6px;
+                padding: 5px 15px;
+                font-size: 13px;
+                color: #1d1d1f;
+            }
+            QPushButton:hover {
+                background-color: #d2d2d7;
+            }
+            QPushButton:pressed {
+                background-color: #c7c7cc;
+            }
+        """)
+        close_button.clicked.connect(dialog.close)
+        bottom_layout.addWidget(close_button)
+        
+        main_layout.addLayout(bottom_layout)
+        
+        # Show dialog
+        dialog.exec()
     
-    def on_closing(self):
+    def on_closing(self, event):
         """
-        Handle window closing event
+        Handle window close event
         """
         # Stop any ongoing processes
         self.analyzing = False
-        self.playing = False
-        self.mic_recording = False
-        self.comparison_active = False
         
-        # Stop playback
-        if pygame.mixer.get_init():
-            pygame.mixer.music.stop()
-            pygame.mixer.quit()
+        # Stop timer
+        if hasattr(self, 'update_timer'):
+            self.update_timer.stop()
         
-        # Remove temporary files
-        if hasattr(self, 'temp_wav_file') and self.temp_wav_file and os.path.exists(self.temp_wav_file):
-            try:
-                os.remove(self.temp_wav_file)
-            except:
-                pass
-        if hasattr(self, 'temp_mic_wav_file') and self.temp_mic_wav_file and os.path.exists(self.temp_mic_wav_file):
-            try:
-                # Only remove temporary mic playback files, keep recorded mic files
-                if os.path.basename(self.temp_mic_wav_file).startswith('temp_mic_playback_'):
-                    os.remove(self.temp_mic_wav_file)
-            except:
-                pass
+        # Stop any ongoing recording and clean up resources
+        if self.mic_recorder.is_recording():
+            self.mic_recorder.stop_recording()
+        self.mic_recorder.cleanup()
         
-        # Close microphone stream
-        if hasattr(self, 'mic_stream') and self.mic_stream:
-            try:
-                self.mic_stream.stop()
-                self.mic_stream.close()
-            except:
-                pass
+        # Stop any ongoing playback and clean up resources
+        self.audio_player.cleanup()
         
-        # Destroy window
-        self.root.destroy()
+        # Accept the close event
+        event.accept()
 
-def main():
-    """
-    Program entry point
-    """
-    root = tk.Tk()
-    app = BPMGUIApp(root)
-    root.mainloop()
 
+# Main function to run the application
 if __name__ == "__main__":
-    main()
+    # Import QApplication here to ensure it's available
+    from PySide6.QtWidgets import QApplication
+    
+    # Create the application instance
+    app = QApplication(sys.argv)
+    
+    # Create and show the main window
+    window = BPMGUIApp()
+    window.show()
+    
+    # Start the event loop
+    sys.exit(app.exec())
