@@ -95,8 +95,7 @@ bpm_analyzer-v2/
 ├── plot_config.py             # Chart styling configuration
 ├── config.json                # Application configuration
 ├── requirements.txt           # Python dependencies
-├── README.md                  # This file
-└── 革命怪客.wav               # Sample audio file
+└── README.md                  # This file
 ```
 
 ## Module Descriptions
